@@ -121,7 +121,7 @@
 2. 训练格子跑完后，再跑预测格子。日志里应出现 `OOS mse=... dir_acc=... ic=...`，以及 `wrote .../pred_I20.parquet`。
 3. `05_plot_top10.ipynb`：Top 10%、十分位、随机分组、扣费对照。
 
-`WINDOW_KEY` 用 `"I20"` 或 `"I60"`，必须和已经生成的图一致。不要和正在读同一份 `images.npy` 的另一个训练同时跑，两边会抢网络盘。
+`WINDOW_KEY` 用 `"I20"` 或 `其他`，必须和已经生成的图一致。不要和正在读同一份 `images.npy` 的另一个训练同时跑，两边会抢网络盘。
 
 主机内存约 62 GB，放不下整份 `images.npy`（I20 的 uint8 数组大约 155 GiB）。训练使用内存映射，不要把整个数组读进内存。
 
@@ -133,3 +133,5 @@
 *.npy  *.pt  *.parquet
 data/  models/  results/  figures/  logs/
 ```
+最后结果：
+<img width="2880" height="1024" alt="I20_decile (4)" src="https://github.com/user-attachments/assets/912e8971-eb55-409d-845b-d7bf53c1d5fb" />
