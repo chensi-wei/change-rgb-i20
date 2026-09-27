@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.env
+data/
+models/
+results/
+figures/
+logs/
+*.npy
+*.pt
+*.parquet

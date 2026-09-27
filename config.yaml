@@ -1,0 +1,69 @@
+project:
+  root: .
+  random_seed: 20260417
+
+paths:
+  processed: "/home/shixi05/ChenSiwei/0914/data/processed"
+  images: data/images
+  # 已生成的 RGB 图，和二分类那一版同一目录，不重新生成。
+  images_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_rgb_I20"
+  # 回归的权重和预测写到旁边，不覆盖二分类的 models / results。
+  output_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_rgb_I20_reg"
+  pingquan_csv: "/storage/server/227server/marketdata/pingquan/daily/pingquan.csv"
+  figures: figures
+  logs: logs
+  models: models
+  results: results
+
+data:
+  train_start: "2015-01-01"
+  train_end:   "2019-12-31"
+  test_start:  "2020-01-01"
+  test_end:    "2025-12-31"
+  train_valid_split: 0.7
+
+universe:
+  ipo_buffer_days: 1
+  exclude_limit_rebalance: true
+  exclude_limit_entry: false
+  exclude_limit_in_window: false
+  exclude_st_in_window: true
+  exclude_suspension_in_window: true
+
+image:
+  windows: {I20: 20, I60: 60}
+  height: 100
+  px_per_day: 3
+  price_rows: 70
+  volume_rows: 15
+  macd_rows: 15
+  return_horizon_days: 5
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+
+cnn:
+  task: regression
+  target: future_ret
+  conv_kernel:  [5, 3]
+  conv_stride:  [3, 1]
+  conv_padding: [12, 1]
+  pool_kernel:  [2, 1]
+  pool_stride:  [2, 1]
+  leaky_relu_slope: 0.01
+  dropout_fc: 0.5
+  filters:
+    I20: [64, 128, 256]
+    I60: [64, 128, 256, 512]
+  ensemble_seeds: 5
+  optimizer: {name: adam, lr: 1.0e-5}
+  batch_size: 128
+  max_epochs: 10
+
+backtest:
+  rebalance_freq: "D"
+  n_sleeves: 5
+  top_frac: 0.10
+  deciles: 10
+  trading_days_per_year: 252
+  transaction_cost_bps: 5
