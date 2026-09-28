@@ -1,7 +1,8 @@
-"""Train / predict grayscale images as a regression on 5-day excess.
+"""Train the day+week fusion as a regression on 5-day excess.
 
-Fixed epochs. The kept epoch is the one with the highest validation Spearman
-rank IC against the raw excess. The loss uses a winsorized, then z-scored target.
+Each sample is two images. The weekly image is the last completed week.
+Fixed epochs. The kept epoch is the highest validation Spearman against the
+raw excess. The loss uses a winsorized, then z-scored target.
 """
 from __future__ import annotations
 
@@ -20,7 +21,8 @@ from tqdm import tqdm
 from cnn import build_model
 
 REMOTE = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body")
-OUTPUT_REMOTE = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body")
+WEEK_REMOTE = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_fuse_week")
+OUTPUT_REMOTE = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_fuse")
 WINDOW_KEY = "I20"
 TARGET_COL = "future_ret"
 
@@ -123,6 +125,39 @@ class IndexedImageDataset(Dataset):
         return torch.from_numpy(x), torch.tensor(y, dtype=torch.float32)
 
 
+class PairedImageDataset(Dataset):
+    """One daily image and the weekly image of the last completed week."""
+
+    def __init__(self, day_images, week_images, frame_idx, day_rows, week_rows,
+                 targets, day_mean, day_std, week_mean, week_std, read_week: bool = True):
+        self.day_images = day_images
+        self.week_images = week_images
+        self.frame_idx = np.asarray(frame_idx, dtype=np.int64)
+        self.day_rows = np.asarray(day_rows, dtype=np.int64)
+        self.week_rows = np.asarray(week_rows, dtype=np.int64)
+        self.targets = np.asarray(targets, dtype=np.float32)
+        self.day_mean = float(day_mean)
+        self.day_std = float(day_std) if day_std > 0 else 1.0
+        self.week_mean = float(week_mean)
+        self.week_std = float(week_std) if week_std > 0 else 1.0
+        self.read_week = bool(read_week)
+
+    def __len__(self) -> int:
+        return len(self.frame_idx)
+
+    def __getitem__(self, i: int):
+        j = int(self.frame_idx[i])
+        day = self.day_images[int(self.day_rows[j])].astype(np.float32)
+        day = torch.from_numpy((day - self.day_mean) / self.day_std)
+        if self.read_week:
+            week = self.week_images[int(self.week_rows[j])].astype(np.float32)
+            week = torch.from_numpy((week - self.week_mean) / self.week_std)
+        else:
+            week = torch.zeros_like(day)
+        y = torch.tensor(float(self.targets[i]), dtype=torch.float32)
+        return day, week, y
+
+
 def fit_pixel_stats_indexed(images: np.ndarray, indices: np.ndarray) -> tuple[float, float]:
     rng = np.random.default_rng(0)
     take = min(20_000, len(indices))
@@ -181,14 +216,24 @@ def _run_epoch(model, loader, device, criterion, y_mean: float, y_std: float,
     ys: list[np.ndarray] = []
     it = tqdm(loader, desc=desc or ("train" if train_mode else "valid"),
               leave=False, mininterval=2.0)
-    for xb, yb in it:
-        xb = xb.to(device, non_blocking=True)
+    for batch in it:
+        if len(batch) == 3:
+            day, week, yb = batch
+            day = day.to(device, non_blocking=True)
+            week = week.to(device, non_blocking=True)
+            n_here = day.size(0)
+            pred_in = (day, week)
+        else:
+            xb, yb = batch
+            xb = xb.to(device, non_blocking=True)
+            n_here = xb.size(0)
+            pred_in = (xb,)
         y_raw = yb.to(device, non_blocking=True).float().view(-1)
         y_clip = torch.clamp(y_raw, y_lo, y_hi)
         y_z = (y_clip - y_mean) / y_std
         if train_mode:
             optimiser.zero_grad(set_to_none=True)
-        pred_z = model(xb).view(-1)
+        pred_z = model(*pred_in).view(-1)
         loss = criterion(pred_z, y_z)
         if train_mode:
             loss.backward()
@@ -196,7 +241,7 @@ def _run_epoch(model, loader, device, criterion, y_mean: float, y_std: float,
         pred_raw = pred_z.detach() * y_std + y_mean
         total_se += torch.sum((pred_raw - y_clip) ** 2).item()
         correct += ((pred_raw > 0) == (y_raw > 0)).sum().item()
-        seen += xb.size(0)
+        seen += n_here
         if collect:
             preds.append(pred_raw.detach().cpu().numpy())
             ys.append(y_raw.detach().cpu().numpy())
@@ -223,7 +268,7 @@ def _finite_mask(labels_df: pd.DataFrame, idx: np.ndarray) -> np.ndarray:
 
 def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
                    num_workers: int = 0, batch_size: int | None = None,
-                   pin_memory: bool = False) -> dict:
+                   pin_memory: bool = False, week_images=None) -> dict:
     rng = np.random.default_rng(seed)
     device = _pick_device()
     window_key = normalize_window_key(window_key)
@@ -252,12 +297,31 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
           f"target mean={y_mean:.6f} std={y_std:.6f}  "
           f"（损失用截尾后再标准化；选模型用原始超额的 Spearman）", flush=True)
 
-    print(f"[seed {seed}] fitting pixel stats ...", flush=True)
-    mean, std = fit_pixel_stats_indexed(images, train_idx)
-    print(f"[seed {seed}] pixel mean={mean:.4f} std={std:.4f}", flush=True)
+    from pair_lib import fuse_inputs
+    inputs = fuse_inputs(cfg)
+    if "day_row" not in labels_df.columns or "week_row" not in labels_df.columns:
+        raise RuntimeError("labels 需要 day_row 和 week_row。先跑配对，不要直接用日 K 的 labels。")
+    day_rows = labels_df["day_row"].to_numpy(np.int64)
+    week_rows = labels_df["week_row"].to_numpy(np.int64)
+    read_week = "week" in inputs
+    if read_week and week_images is None:
+        raise RuntimeError("fuse.inputs 含 week，但没有周 K 图")
+    print(f"[seed {seed}] fitting pixel stats ...  inputs={inputs}", flush=True)
+    mean, std = fit_pixel_stats_indexed(images, np.unique(day_rows[train_idx]))
+    if read_week:
+        w_mean, w_std = fit_pixel_stats_indexed(week_images, np.unique(week_rows[train_idx]))
+    else:
+        w_mean, w_std = 0.0, 1.0
+    print(f"[seed {seed}] day mean={mean:.4f} std={std:.4f}  "
+          f"week mean={w_mean:.4f} std={w_std:.4f}", flush=True)
 
-    ds_train = IndexedImageDataset(images, train_idx, y_all[train_idx], mean, std)
-    ds_valid = IndexedImageDataset(images, valid_idx, y_all[valid_idx], mean, std)
+    def _ds(idx):
+        return PairedImageDataset(
+            images, week_images, idx, day_rows, week_rows, y_all[idx],
+            mean, std, w_mean, w_std, read_week=read_week)
+
+    ds_train = _ds(train_idx)
+    ds_valid = _ds(valid_idx)
     if batch_size is None:
         batch = 32 if window_key == "I60" else 64
     else:
@@ -320,6 +384,8 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
         payload = {
             "state_dict": best_state,
             "mean": mean, "std": std,
+            "week_mean": w_mean, "week_std": w_std,
+            "fuse_inputs": inputs,
             "y_mean": y_mean, "y_std": y_std,
             "winsor_lo": y_lo, "winsor_hi": y_hi,
             "seed": seed, "window": window_key,
@@ -340,6 +406,8 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
     _save_ckpt(out_path, {
         "state_dict": best_state,
         "mean": mean, "std": std,
+        "week_mean": w_mean, "week_std": w_std,
+        "fuse_inputs": inputs,
         "y_mean": y_mean, "y_std": y_std,
         "winsor_lo": y_lo, "winsor_hi": y_hi,
         "seed": seed, "window": window_key,
@@ -361,6 +429,81 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
     }
 
 
+def _image_dir_ok(path: Path) -> bool:
+    return (path / "images.npy").is_file() and (path / "labels.parquet").is_file()
+
+
+def resolve_day_dir(cfg, window_key: str) -> Path:
+    window_key = normalize_window_key(window_key)
+    path = Path(getattr(cfg.paths, "images_remote", REMOTE)) / window_key
+    if not _image_dir_ok(path):
+        raise FileNotFoundError(
+            f"日 K 不在 {path}。这一支直接读 k_pictures_gray_body，不重新画日 K。"
+        )
+    return path
+
+
+def resolve_week_dir(paths: dict, cfg, window_key: str) -> Path:
+    window_key = normalize_window_key(window_key)
+    root = Path(getattr(cfg.paths, "week_images_remote", WEEK_REMOTE))
+    if root.name in {"k_pictures_gray_body", "k_pictures_gray_week",
+                     "k_pictures_rgb_I20", "k_pictures_gray_reg"}:
+        raise RuntimeError(
+            f"week_images_remote={root} 指到了已有实验。周 K 要写到 k_pictures_gray_fuse_week。"
+        )
+    remote = root / window_key
+    if _image_dir_ok(remote):
+        return remote
+    pointer = Path(paths["week_images"]) / f"{window_key}_LOCATION.txt"
+    if pointer.exists():
+        pointed = Path(pointer.read_text(encoding="utf-8").strip())
+        if _image_dir_ok(pointed):
+            return pointed
+    local = Path(paths["week_images"]) / window_key
+    if _image_dir_ok(local):
+        return local
+    raise FileNotFoundError(
+        f"找不到周 K 图。先跑 03，写到 {remote}。不要读 k_pictures_gray_week。"
+    )
+
+
+def _paired_label_file(paths: dict, cfg, window_key: str) -> Path:
+    window_key = normalize_window_key(window_key)
+    remote = Path(getattr(cfg.paths, "output_remote", OUTPUT_REMOTE)) / window_key
+    return _writable_dir(remote, Path(paths["results"]) / window_key) / "paired_labels.parquet"
+
+
+def load_paired_frame(cfg, paths, window_key: str):
+    """Daily images, weekly images, and the joined labels."""
+    from pair_lib import align_day_week
+
+    window_key = normalize_window_key(window_key)
+    day_dir = resolve_day_dir(cfg, window_key)
+    week_dir = resolve_week_dir(paths, cfg, window_key)
+    print("day images =", day_dir)
+    print("week images =", week_dir)
+    day_images = np.load(day_dir / "images.npy", mmap_mode="r")
+    week_images = np.load(week_dir / "images.npy", mmap_mode="r")
+    day_labels = pd.read_parquet(day_dir / "labels.parquet")
+    week_labels = pd.read_parquet(week_dir / "labels.parquet")
+    expect = image_hw(cfg, window_key)
+    for name, arr in (("day", day_images), ("week", week_images)):
+        if arr.ndim != 4 or tuple(arr.shape[1:]) != expect:
+            raise ValueError(
+                f"期望 {name} images (N,{expect[0]},{expect[1]},{expect[2]})，实际 {arr.shape}"
+            )
+    if len(day_labels) != len(day_images) or len(week_labels) != len(week_images):
+        raise RuntimeError(
+            f"labels 和 images 行数不一致 day {len(day_labels)}/{len(day_images)} "
+            f"week {len(week_labels)}/{len(week_images)}"
+        )
+    paired = align_day_week(day_labels, week_labels, cfg)
+    out = _paired_label_file(paths, cfg, window_key)
+    paired.to_parquet(out, index=False)
+    print("paired labels =", out)
+    return day_images, week_images, paired
+
+
 def train_window(cfg, paths, window_key: str = WINDOW_KEY, n_seeds: int = 5,
                  num_workers: int = 0, skip_existing: bool = True,
                  batch_size: int | None = None,
@@ -369,17 +512,10 @@ def train_window(cfg, paths, window_key: str = WINDOW_KEY, n_seeds: int = 5,
     task = str(getattr(cfg.cnn, "task", ""))
     if task != "regression":
         raise RuntimeError(f"cnn.task 应为 regression，实际是 {task!r}")
-    img_dir = resolve_window_dir(paths, cfg, window_key)
     model_dir = resolve_model_dir(paths, cfg, window_key)
-    print("images =", img_dir)
     print("models =", model_dir)
     print(f"epochs = {int(cfg.cnn.max_epochs)}  （固定轮数，不早停，按验证集 Spearman IC 留最好一轮）")
-    images = np.load(img_dir / "images.npy", mmap_mode="r")
-    labels = pd.read_parquet(img_dir / "labels.parquet")
-    print("loaded", images.shape, "labels", len(labels), labels["split"].value_counts().to_dict())
-    expect = image_hw(cfg, window_key)
-    if images.ndim != 4 or tuple(images.shape[1:]) != expect:
-        raise ValueError(f"期望 images (N,{expect[0]},{expect[1]},{expect[2]})，实际 {images.shape}")
+    images, week_images, labels = load_paired_frame(cfg, paths, window_key)
 
     results = []
     for k in range(n_seeds):
@@ -391,7 +527,7 @@ def train_window(cfg, paths, window_key: str = WINDOW_KEY, n_seeds: int = 5,
         results.append(train_one_seed(
             images, labels, cfg, window_key, seed, ckpt,
             num_workers=num_workers, batch_size=batch_size,
-            pin_memory=pin_memory))
+            pin_memory=pin_memory, week_images=week_images))
     log_dir = Path(paths["logs"])
     log_dir.mkdir(parents=True, exist_ok=True)
     with (log_dir / f"train_{window_key}_summary.json").open("w") as f:
@@ -412,10 +548,15 @@ def _infer_pred(model, loader, device, y_mean: float, y_std: float) -> np.ndarra
     model.eval()
     preds = []
     with torch.no_grad():
-        for xb, _ in tqdm(loader, desc="infer", leave=False):
-            xb = xb.to(device, non_blocking=True)
+        for batch in tqdm(loader, desc="infer", leave=False):
+            if len(batch) == 3:
+                day, week, _ = batch
+                tensors = (day.to(device, non_blocking=True), week.to(device, non_blocking=True))
+            else:
+                xb, _ = batch
+                tensors = (xb.to(device, non_blocking=True),)
             with _amp_ctx(device):
-                z = model(xb).view(-1)
+                z = model(*tensors).view(-1)
                 pred = z * y_std + y_mean
             preds.append(pred.detach().float().cpu().numpy())
     return np.concatenate(preds)
@@ -423,13 +564,13 @@ def _infer_pred(model, loader, device, y_mean: float, y_std: float) -> np.ndarra
 
 def predict_window(cfg, paths, window_key: str = WINDOW_KEY,
                    num_workers: int = 0) -> pd.DataFrame:
+    from pair_lib import fuse_inputs
+
     window_key = normalize_window_key(window_key)
-    img_dir = resolve_window_dir(paths, cfg, window_key)
     model_dir = resolve_model_dir(paths, cfg, window_key)
     results_dir = resolve_results_dir(paths, cfg)
-
-    images = np.load(img_dir / "images.npy", mmap_mode="r")
-    labels = pd.read_parquet(img_dir / "labels.parquet")
+    images, week_images, labels = load_paired_frame(cfg, paths, window_key)
+    inputs = fuse_inputs(cfg)
     test_idx = np.flatnonzero(labels["split"].astype(str) == "test")
     if len(test_idx) == 0:
         raise RuntimeError("没有 test 样本")
@@ -438,7 +579,7 @@ def predict_window(cfg, paths, window_key: str = WINDOW_KEY,
     if not finite.all():
         test_idx = test_idx[finite]
     test_labels = labels.iloc[test_idx].reset_index(drop=True)
-    print(f"{window_key} test images={len(test_idx)}")
+    print(f"{window_key} test images={len(test_idx)}  inputs={inputs}")
 
     ckpts = _seed_ckpts(model_dir)
     if not ckpts:
@@ -456,9 +597,21 @@ def predict_window(cfg, paths, window_key: str = WINDOW_KEY,
             raise RuntimeError(f"{ck_path} 不是回归权重（task={ck.get('task')!r}）")
         if "y_mean" not in ck or "y_std" not in ck:
             raise RuntimeError(f"{ck_path} 缺少 y_mean/y_std，不是这一版回归权重")
+        ck_inputs = [str(x) for x in ck.get("fuse_inputs", [])]
+        if ck_inputs != inputs:
+            raise RuntimeError(
+                f"{ck_path} 的 fuse_inputs={ck_inputs}，config 是 {inputs}。不要混用对照权重。"
+            )
         model = build_model(window_key, cfg).to(device)
         model.load_state_dict(ck["state_dict"])
-        ds = IndexedImageDataset(images, test_idx, y[test_idx], ck["mean"], ck["std"])
+        ds = PairedImageDataset(
+            images, week_images, test_idx,
+            labels["day_row"].to_numpy(np.int64),
+            labels["week_row"].to_numpy(np.int64),
+            y[test_idx], ck["mean"], ck["std"],
+            ck.get("week_mean", 0.0), ck.get("week_std", 1.0),
+            read_week=("week" in inputs),
+        )
         dl = DataLoader(ds, batch_size=batch, shuffle=False,
                         num_workers=num_workers, pin_memory=(device.type == "cuda"))
         print("infer", ck_path.name, "seed", ck.get("seed"),
@@ -828,9 +981,8 @@ def plot_top10_excess(cfg, paths, window_key: str = WINDOW_KEY,
     ax.axhline(0.0, color="black", lw=0.7)
     ax.set_ylabel("Cumulative excess vs 688 pingquan (%)")
     ax.set_title(
-        f"CNN-{window_key} gray body top {top_frac:.0%}  "
-        f"{n_sleeves}-sleeve daily MTM excess (gross)  "
-        f"ann={ann:.2%}  sharpe={sharpe:.2f}")
+        f"{window_key} 日K+周K  每天调仓  {n_sleeves}个组合  持有{int(getattr(cfg.image, 'return_horizon_days', 5))}日  "
+        f"前{top_frac:.0%}  ann={ann:.2%}  sharpe={sharpe:.2f}")
     ax.grid(True, alpha=0.25)
     fig.tight_layout()
     fig_dir = Path(paths["figures"])
@@ -894,8 +1046,7 @@ def plot_top10_gross_net(cfg, paths, window_key: str = WINDOW_KEY,
     ax.axhline(0.0, color="black", lw=0.7)
     ax.set_ylabel("Cumulative excess vs 688 pingquan (%)")
     ax.set_title(
-        f"CNN-{window_key} gray body top {top_frac:.0%}  "
-        f"{n_sleeves}-sleeve daily MTM  gross vs net")
+        f"{window_key} 日K+周K  每天调仓  {n_sleeves}个组合  gross vs net")
     ax.legend(frameon=False)
     ax.grid(True, alpha=0.25)
     fig.tight_layout()
@@ -968,7 +1119,7 @@ def plot_random_groups(cfg, paths, window_key: str = WINDOW_KEY, n_groups: int =
         ax.plot(drawn.index, drawn.values * 100, color="black", lw=2.3,
                 label="所选平权-688", zorder=5)
     ax.axhline(0.0, color="black", lw=0.7)
-    ax.set_title(f"{window_key} gray body {n_groups} groups  ({n_sleeves}-sleeve daily MTM)")
+    ax.set_title(f"{window_key} 日K+周K  每天调仓  {n_sleeves}个组合")
     ax.set_ylabel("Cumulative excess vs pingquan (%)")
     ax.legend(frameon=False, ncol=5)
     ax.grid(True, alpha=0.25)

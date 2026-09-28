@@ -1,4 +1,4 @@
-"""Daily grayscale images for I20 or I60. Filters and labels match no_rolling."""
+"""Image helpers. This branch's generate_images draws completed weekly bars."""
 from __future__ import annotations
 
 import json
@@ -428,226 +428,17 @@ def generate_images(
     require_volume: bool = True,
     use_remote="auto",
 ) -> dict:
-    spec = _image_cfg(cfg, window_key)
-    window_key = spec["window_key"]
-    window = spec["window"]
-    height = spec["height"]
-    width = spec["width"]
-    horizon = int(cfg.image.return_horizon_days)
-
-    proc_dir = resolve_processed_dir(cfg, paths)
-    px_path = proc_dir / "prices.parquet"
-
-    img_root, used_remote = resolve_image_root(
-        cfg, paths, use_remote=use_remote,
-        max_codes=max_codes, debug_codes=debug_codes)
-    img_dir = img_root / window_key
-    img_dir.mkdir(parents=True, exist_ok=True)
-
-    uni = getattr(cfg, "universe", None)
-    ipo_buffer_days = int(getattr(uni, "ipo_buffer_days", 0)) if uni else 0
-    excl_reb = bool(getattr(uni, "exclude_limit_rebalance", False)) if uni else False
-    excl_entry = bool(getattr(uni, "exclude_limit_entry", False)) if uni else False
-    excl_limit_window = bool(getattr(uni, "exclude_limit_in_window", False)) if uni else False
-    excl_st_window = bool(getattr(uni, "exclude_st_in_window", False)) if uni else False
-    excl_susp_window = bool(getattr(uni, "exclude_suspension_in_window", False)) if uni else False
-
-    prices = pd.read_parquet(px_path)
-    prices["date"] = pd.to_datetime(prices["date"])
-    uni_path = proc_dir / "universe.parquet"
-    if uni_path.exists():
-        u = pd.read_parquet(uni_path)
-        eligible = set(u.loc[u["eligible"], "code"].astype(str))
-        prices = prices[prices["code"].astype(str).isin(eligible)]
-
-    if debug_codes:
-        want = {str(c).zfill(6) for c in debug_codes}
-        prices = prices[prices["code"].astype(str).str.zfill(6).isin(want)]
-    elif max_codes is not None:
-        codes = sorted(prices["code"].astype(str).str.zfill(6).unique())[:max_codes]
-        prices = prices[prices["code"].astype(str).str.zfill(6).isin(codes)]
-
-    has_limit = "limit_up" in prices.columns and "limit_down" in prices.columns
-    has_st = "is_st" in prices.columns
-    has_open_cap = "open_limit_up" in prices.columns
-
-    cal_path = proc_dir / "trading_calendar.parquet"
-    if cal_path.exists():
-        cal = pd.to_datetime(pd.read_parquet(cal_path)["trade_date"]).sort_values()
-        cal = pd.DatetimeIndex(cal.reset_index(drop=True))
-        calpos_lookup = pd.Series(np.arange(len(cal)), index=cal.values)
-    else:
-        cal = pd.DatetimeIndex([])
-        calpos_lookup = None
-
-    reb_dates = daily_rebalance_dates(cal, cfg.data.train_start, cfg.data.test_end)
-    print(f"rebalance=daily  n_dates={len(reb_dates)}  "
-          f"{None if len(reb_dates) == 0 else reb_dates.min().date()}→"
-          f"{None if len(reb_dates) == 0 else reb_dates.max().date()}")
-    reb_vals = pd.DatetimeIndex(reb_dates).values.astype("datetime64[ns]")
-
-    train_start = pd.Timestamp(cfg.data.train_start)
-    train_end = pd.Timestamp(cfg.data.train_end)
-    test_start = pd.Timestamp(cfg.data.test_start)
-    test_end = pd.Timestamp(cfg.data.test_end)
-
-    pingquan_path = str(getattr(cfg.paths, "pingquan_csv",
-        "/storage/server/227server/marketdata/pingquan/daily/pingquan.csv"))
-    mkt_s = load_pingquan_688(pingquan_path)
-
-    payloads = []
-    for code, grp in prices.groupby("code", sort=False):
-        grp = grp.sort_values("date")
-        dates = grp["date"].to_numpy("datetime64[ns]")
-        n = len(dates)
-        pos = np.searchsorted(dates, reb_vals)
-        inb = pos < n
-        pos_clip = np.where(inb, pos, 0)
-        match = inb & (dates[pos_clip] == reb_vals)
-        reb_ix = pos[match].astype(np.int64)
-        if reb_ix.size == 0:
-            continue
-        lu = grp["limit_up"].to_numpy(bool) if has_limit else np.zeros(n, bool)
-        ld = grp["limit_down"].to_numpy(bool) if has_limit else np.zeros(n, bool)
-        st = grp["is_st"].to_numpy(bool) if has_st else np.zeros(n, bool)
-        olu = grp["open_limit_up"].to_numpy(bool) if has_open_cap else np.zeros(n, bool)
-        if calpos_lookup is not None:
-            mp = calpos_lookup.reindex(pd.DatetimeIndex(dates)).to_numpy(dtype=np.float64)
-            if np.isnan(mp).any():
-                mp = None
-            else:
-                mp = mp.astype(np.int64)
-        else:
-            mp = None
-        mkt_all = mkt_s.reindex(pd.DatetimeIndex(dates)).to_numpy(dtype=np.float64)
-        payloads.append((
-            str(code).zfill(6), dates,
-            grp["open"].to_numpy(float), grp["high"].to_numpy(float),
-            grp["low"].to_numpy(float), grp["close"].to_numpy(float),
-            grp["ret"].to_numpy(float), grp["volume"].to_numpy(float),
-            lu, ld, st, olu, mp, reb_ix, mkt_all,
-        ))
-
-    del prices
-    import gc
-    gc.collect()
-
-    print(f"filters: limit_rebalance={excl_reb}  limit_entry(t+1)={excl_entry}  "
-          f"st_window={excl_st_window}  susp={excl_susp_window}")
-    params = dict(
-        window=window, horizon=horizon,
-        ipo_buffer_days=ipo_buffer_days,
-        excl_reb=excl_reb, excl_entry=excl_entry,
-        excl_limit_window=excl_limit_window,
-        excl_st_window=excl_st_window,
-        excl_susp_window=excl_susp_window,
-        count_only=count_only, has_limit=has_limit, has_st=has_st,
-        has_open_cap=has_open_cap, require_volume=require_volume,
-        draw_kw=spec["draw_kw"],
-        macd_warmup=int(getattr(cfg.image, "macd_warmup", 105)),
+    """One picture per completed week. Does not rewrite the daily images."""
+    from week_pictures import generate_week_pictures
+    return generate_week_pictures(
+        cfg, paths, window_key,
+        max_codes=max_codes,
+        debug_codes=debug_codes,
+        count_only=count_only,
+        jobs=jobs,
+        require_volume=require_volume,
+        use_remote=use_remote,
     )
-
-    all_meta: list[tuple] = []
-    shard_rows: list[tuple] = []
-    desc = f"{'count' if count_only else 'images'} {window_key}"
-    jobs = max(1, int(jobs))
-    if jobs > 1:
-        os.environ.setdefault("OMP_NUM_THREADS", "1")
-        os.environ.setdefault("MKL_NUM_THREADS", "1")
-        os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-
-    import tempfile
-    shard_dir = None
-    if not count_only:
-        shard_dir = Path(tempfile.mkdtemp(prefix=f"{window_key}_gray_shards_"))
-        print(f"shard dir (local) = {shard_dir}")
-
-    if count_only:
-        _init_worker(params)
-        if jobs == 1:
-            for pl in tqdm(payloads, desc=desc):
-                _, meta = _gen_one_stock(pl)
-                all_meta.extend(meta)
-        else:
-            with ProcessPoolExecutor(max_workers=jobs,
-                                     initializer=_init_worker,
-                                     initargs=(params,)) as ex:
-                for _, meta in tqdm(
-                        ex.map(_gen_one_stock, payloads, chunksize=4),
-                        total=len(payloads), desc=desc):
-                    all_meta.extend(meta)
-    else:
-        tasks = [(i, pl, str(shard_dir)) for i, pl in enumerate(payloads)]
-        if jobs == 1:
-            _init_worker(params)
-            for task in tqdm(tasks, desc=desc):
-                shard_rows.append(_gen_one_stock_shard(task))
-                all_meta.extend(shard_rows[-1][3])
-        else:
-            with ProcessPoolExecutor(max_workers=jobs,
-                                     initializer=_init_worker,
-                                     initargs=(params,)) as ex:
-                for row in tqdm(
-                        ex.map(_gen_one_stock_shard, tasks, chunksize=1),
-                        total=len(tasks), desc=desc):
-                    shard_rows.append(row)
-                    all_meta.extend(row[3])
-
-    info = {
-        "window_key": window_key,
-        "n_payloads": len(payloads),
-        "n_obs": len(all_meta),
-        "img_dir": img_dir,
-        "used_remote": used_remote,
-        "shape": None,
-        "split": {},
-    }
-    if not all_meta:
-        print("no observations generated")
-        return info
-
-    meta_df = pd.DataFrame(
-        all_meta,
-        columns=["code", "date", "future_ret", "label", "stock_ret", "mkt_ret"])
-    meta_df["date"] = pd.to_datetime(meta_df["date"])
-    ratio = float(getattr(cfg.data, "train_valid_split", 0.7))
-    meta_df = assign_nonoverlapping_tv_splits(
-        meta_df, cal, window,
-        train_start, train_end, test_start, test_end, ratio=ratio)
-    assert_no_split_kline_overlap(meta_df, cal, window)
-    info["split"] = meta_df["split"].value_counts().to_dict()
-    info["n_obs"] = len(meta_df)
-
-    if count_only:
-        return info
-
-    out_npy = img_dir / "images.npy"
-    meta_df.to_parquet(img_dir / "labels.parquet", index=False)
-    spec_path = img_dir / "image_spec.json"
-    spec_path.write_text(json.dumps({
-        "layout": "NCHW",
-        "window": window,
-        "height": height,
-        "width": width,
-        "channels": 1,
-        "price_rows": int(cfg.image.price_rows),
-        "volume_rows": int(cfg.image.volume_rows),
-        "macd_rows": int(cfg.image.macd_rows),
-        "px_per_day": int(cfg.image.px_per_day),
-    }, indent=2), encoding="utf-8")
-    pointer = Path(paths["images"]) / f"{window_key}_LOCATION.txt"
-    pointer.parent.mkdir(parents=True, exist_ok=True)
-    pointer.write_text(str(img_dir.resolve()), encoding="utf-8")
-    print(f"saved {img_dir / 'labels.parquet'}  n={len(meta_df)}  split={info['split']}")
-    print("concatenating shards on local disk ...")
-    shape = _concat_image_shards(shard_rows, out_npy, height, width, jobs=max(jobs, 8))
-    if shard_dir is not None:
-        import shutil
-        shutil.rmtree(shard_dir, ignore_errors=True)
-    info["shape"] = shape
-    print(f"saved {out_npy}  {shape}")
-    print(f"location pointer {pointer}")
-    return info
 
 
 def verify_images(cfg, paths: dict, window_key: str = "I20",
@@ -656,11 +447,11 @@ def verify_images(cfg, paths: dict, window_key: str = "I20",
     window = spec["window"]
     window_key = spec["window_key"]
     if img_dir is None:
-        pointer = Path(paths["images"]) / f"{window_key}_LOCATION.txt"
+        pointer = Path(paths.get("week_images", paths["images"])) / f"{window_key}_LOCATION.txt"
         if pointer.exists():
             img_dir = Path(pointer.read_text(encoding="utf-8").strip())
         else:
-            img_dir = Path(paths["images"]) / window_key
+            img_dir = Path(paths.get("week_images", paths["images"])) / window_key
     img_dir = Path(img_dir)
     fig_dir = Path(paths["figures"])
     fig_dir.mkdir(parents=True, exist_ok=True)
@@ -723,27 +514,31 @@ def verify_images(cfg, paths: dict, window_key: str = "I20",
     verdict(bool((macd_left == int(DIF_GRAY)).any() and (macd_right == int(DEA_GRAY)).any()),
             "MACD panel has DIF and DEA")
 
-    train = labels[labels["split"] == "train"]
-    valid = labels[labels["split"] == "valid"]
-    test = labels[labels["split"] == "test"]
-    cal_path = resolve_processed_dir(cfg, paths) / "trading_calendar.parquet"
-    if cal_path.exists() and len(train):
-        cal = pd.DatetimeIndex(
-            pd.to_datetime(pd.read_parquet(cal_path)["trade_date"]).sort_values())
-        assert_no_split_kline_overlap(labels, cal, window)
-    if len(train):
-        print(f"[INFO] train {train['date'].min().date()}→{train['date'].max().date()}  "
-              f"n={len(train)}")
-    if len(valid):
-        print(f"[INFO] valid {valid['date'].min().date()}→{valid['date'].max().date()}  "
-              f"n={len(valid)}")
-    if len(test):
-        print(f"[INFO] test  {test['date'].min().date()}→{test['date'].max().date()}  "
-              f"n={len(test)}")
-    tv = labels[labels["split"].isin(["train", "valid"])]
-    if len(tv):
-        print(f"[INFO] train+valid label1={float(tv['label'].mean()):.3f}  "
-              f"excess mean={float(tv['future_ret'].mean()):.5f}")
+    if "split" in labels.columns:
+        train = labels[labels["split"] == "train"]
+        valid = labels[labels["split"] == "valid"]
+        test = labels[labels["split"] == "test"]
+        cal_path = resolve_processed_dir(cfg, paths) / "trading_calendar.parquet"
+        if cal_path.exists() and len(train):
+            cal = pd.DatetimeIndex(
+                pd.to_datetime(pd.read_parquet(cal_path)["trade_date"]).sort_values())
+            assert_no_split_kline_overlap(labels, cal, window)
+        if len(train):
+            print(f"[INFO] train {train['date'].min().date()}→{train['date'].max().date()}  "
+                  f"n={len(train)}")
+        if len(valid):
+            print(f"[INFO] valid {valid['date'].min().date()}→{valid['date'].max().date()}  "
+                  f"n={len(valid)}")
+        if len(test):
+            print(f"[INFO] test  {test['date'].min().date()}→{test['date'].max().date()}  "
+                  f"n={len(test)}")
+        tv = labels[labels["split"].isin(["train", "valid"])]
+        if len(tv) and "future_ret" in tv.columns:
+            print(f"[INFO] train+valid label1={float(tv['label'].mean()):.3f}  "
+                  f"excess mean={float(tv['future_ret'].mean()):.5f}")
+    else:
+        print(f"[INFO] week pictures n={len(labels)}  "
+              f"{labels['date'].min().date()}→{labels['date'].max().date()}")
 
     try:
         import matplotlib.pyplot as plt
@@ -761,13 +556,15 @@ def verify_images(cfg, paths: dict, window_key: str = "I20",
         ax.imshow(images[k, 0], cmap="gray", vmin=0, vmax=255,
                   interpolation="nearest", aspect="equal")
         meta = labels.iloc[k]
-        ax.set_title(
-            f"{meta['code']} {pd.Timestamp(meta['date']).date()}\n"
-            f"y={int(meta['label'])} ret={meta['future_ret']:+.2%}",
-            fontsize=7)
+        title = f"{meta['code']} {pd.Timestamp(meta['date']).date()}"
+        if "future_ret" in labels.columns:
+            title += f"\ny={int(meta['label'])} ret={meta['future_ret']:+.2%}"
+        else:
+            title += "\nweek-end"
+        ax.set_title(title, fontsize=7)
         ax.axis("off")
     fig_path = fig_dir / f"verify_{window_key}.png"
-    fig.suptitle(f"{window_key} gray body {height}x{width}", fontsize=12)
+    fig.suptitle(f"{window_key} completed week {height}x{width}", fontsize=12)
     fig.tight_layout()
     fig.savefig(fig_path, dpi=120, bbox_inches="tight")
     plt.close(fig)

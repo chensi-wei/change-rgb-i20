@@ -106,7 +106,6 @@ def plot_decile_dashboard(cfg, paths, window_key: str = "I20", n_deciles: int = 
             label=str(g)))
         table_rows.append([
             str(g),
-            "全周期",
             f"{float(r.mean()):.5f}",
             f"{annualised_return(r, days_per_year):.2%}",
             f"{sharpe(r, days_per_year):.5f}",
@@ -115,7 +114,9 @@ def plot_decile_dashboard(cfg, paths, window_key: str = "I20", n_deciles: int = 
 
     ax.axhline(0.0, color="#222222", lw=0.8)
     ax.set_ylabel("累计超额 (%)")
-    ax.set_title(f"{window_key} gray body  {n_sleeves}-sleeve", loc="left", fontsize=13, pad=10)
+    ax.set_title(
+        f"{window_key} 日K+周K  每天调仓  {n_sleeves}个组合  持有{horizon}日",
+        loc="left", fontsize=13, pad=10)
     ax.grid(True, axis="y", color="#EEEEEE", lw=0.7)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -123,7 +124,7 @@ def plot_decile_dashboard(cfg, paths, window_key: str = "I20", n_deciles: int = 
         handles=legend_handles, loc="lower center", bbox_to_anchor=(0.5, 1.02),
         ncol=n_deciles, frameon=False, handletextpad=0.2, columnspacing=0.85)
 
-    headers = ["组号", "周期", "均值", "年化收益", "夏普率", "日胜率"]
+    headers = ["组号", "日均超额", "年化收益", "夏普率", "胜率"]
     tbl = ax_tbl.table(
         cellText=table_rows, colLabels=headers,
         loc="center", cellLoc="center", bbox=[0.0, 0.08, 1.0, 0.84])

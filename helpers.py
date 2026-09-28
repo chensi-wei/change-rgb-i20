@@ -88,7 +88,9 @@ def make_dirs(cfg: SimpleNamespace) -> dict[str, Path]:
     results_dir = abspath(cfg, getattr(cfg.paths, "results", "results"))
     remote = Path(str(getattr(cfg.paths, "images_remote", "") or "")).expanduser()
     output = Path(str(getattr(cfg.paths, "output_remote", "") or "")).expanduser()
-    for d in (img_dir, log_dir, fig_dir, model_dir, results_dir):
+    week_remote = Path(str(getattr(cfg.paths, "week_images_remote", "") or "")).expanduser()
+    week_local = abspath(cfg, getattr(cfg.paths, "week_images", "data/week_images"))
+    for d in (img_dir, week_local, log_dir, fig_dir, model_dir, results_dir):
         d.mkdir(parents=True, exist_ok=True)
     if proc_dir.exists() or not proc_dir.is_absolute():
         proc_dir.mkdir(parents=True, exist_ok=True)
@@ -96,6 +98,8 @@ def make_dirs(cfg: SimpleNamespace) -> dict[str, Path]:
         "processed": proc_dir,
         "images": img_dir,
         "images_remote": remote,
+        "week_images": week_local,
+        "week_images_remote": week_remote,
         "output_remote": output,
         "models": model_dir,
         "results": results_dir,

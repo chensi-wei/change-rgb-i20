@@ -5,9 +5,13 @@ project:
 paths:
   processed: "/home/shixi05/ChenSiwei/0914/data/processed"
   images: data/images
-  # 这一版重新生成的灰度图。不要覆盖 k_pictures_rgb_I20 和 k_pictures_gray_reg。
+  week_images: data/week_images
+  # 日 K 只读，不要往这里写。
   images_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body"
-  output_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body"
+  # 每个已走完的周一张图。周一到周四复用最近的这一张。
+  week_images_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_fuse_week"
+  # 权重、配对表、预测。不要写回 gray_body 或 gray_week。
+  output_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_fuse"
   pingquan_csv: "/storage/server/227server/marketdata/pingquan/daily/pingquan.csv"
   figures: figures
   logs: logs
@@ -63,6 +67,12 @@ cnn:
   optimizer: {name: adam, lr: 1.0e-5}
   batch_size: 128
   max_epochs: 10
+
+fuse:
+  # [day, week] 是两个塔拼接。[day] 是同一批样本上的日 K 对照，用来看周 K 有没有增量。
+  inputs: [day, week]
+  # 20 根周 K 大约 100 个交易日。切分间隔按这个来，避免同一根周 K 出现在训练和验证里。
+  embargo_days: 100
 
 backtest:
   rebalance_freq: "D"
