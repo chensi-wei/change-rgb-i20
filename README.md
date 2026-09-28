@@ -41,6 +41,8 @@ gray-body 日 K、同一套 5 组合，最高一组大约年化 15.77%、夏普 
 
 代码放到新目录，不要覆盖 gray-body 或 gray-week 的代码和图片。
 
-打开 `run_all.ipynb`，Run All。参数在第二格：`MAX_CODES = None` 是全量，`N_SEEDS = 1`。抽样看图把 `MAX_CODES` 改成 `20`，那样训练会停住。
+1. `03_generate_images.ipynb`：`MAX_CODES = 20` 先看拼图，日期应是周末。再改 `None` 跑全量。
+2. `04_train_predict.ipynb`：`N_SEEDS = 1`。
+3. `05_plot_top10.ipynb`。
 
 日 K 约 150GB，周 K 大约是它的五分之一。训练时每个样本要读两个 memmap，会比单塔更慢。
