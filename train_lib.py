@@ -1,4 +1,8 @@
-"""Train / predict RGB images as a regression on 5-day excess. Fixed 10 epochs, keep the best."""
+"""Train / predict grayscale images as a regression on 5-day excess.
+
+Fixed epochs. The kept epoch is the one with the highest validation Spearman
+rank IC against the raw excess. The loss uses a winsorized, then z-scored target.
+"""
 from __future__ import annotations
 
 import json
@@ -15,8 +19,8 @@ from tqdm import tqdm
 
 from cnn import build_model
 
-REMOTE = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_rgb_I20")
-OUTPUT_REMOTE = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_rgb_I20_reg")
+REMOTE = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body")
+OUTPUT_REMOTE = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body")
 WINDOW_KEY = "I20"
 TARGET_COL = "future_ret"
 
@@ -46,7 +50,8 @@ def image_hw(cfg, window_key: str) -> tuple[int, int, int]:
     window = int(getattr(cfg.image.windows, key))
     height = int(cfg.image.height)
     width = window * int(cfg.image.px_per_day)
-    return 3, height, width
+    channels = int(getattr(cfg.image, "channels", 1))
+    return channels, height, width
 
 
 def resolve_window_dir(paths: dict, cfg, window_key: str = WINDOW_KEY) -> Path:
@@ -64,7 +69,7 @@ def resolve_window_dir(paths: dict, cfg, window_key: str = WINDOW_KEY) -> Path:
         return local
     raise FileNotFoundError(
         f"找不到 {window_key}/images.npy。"
-        f"应在 {remote}，与二分类那一版同一位置，不用重新生成。"
+        f"应在 {remote}。这一版要重新生成灰度图，不要读 RGB 那份 images.npy。"
     )
 
 
@@ -134,20 +139,53 @@ def _pick_device() -> torch.device:
     return torch.device("cpu")
 
 
+def _spearman(pred: np.ndarray, y: np.ndarray) -> float:
+    pred = np.asarray(pred, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    if pred.size < 3:
+        return float("nan")
+    pr = np.argsort(np.argsort(pred)).astype(np.float64)
+    yr = np.argsort(np.argsort(y)).astype(np.float64)
+    pr -= pr.mean()
+    yr -= yr.mean()
+    denom = float(np.sqrt((pr * pr).sum() * (yr * yr).sum()))
+    if denom == 0.0:
+        return float("nan")
+    return float((pr * yr).sum() / denom)
+
+
+def _winsor_bounds(y_train: np.ndarray, cfg) -> tuple[float, float]:
+    qs = getattr(cfg.cnn, "winsor_quantiles", None)
+    if qs is None:
+        q_lo, q_hi = 0.01, 0.99
+    else:
+        q_lo, q_hi = float(qs[0]), float(qs[1])
+    lo = float(np.quantile(y_train, q_lo))
+    hi = float(np.quantile(y_train, q_hi))
+    if not np.isfinite(lo) or not np.isfinite(hi) or lo > hi:
+        lo = float(np.min(y_train))
+        hi = float(np.max(y_train))
+    return lo, hi
+
+
 def _run_epoch(model, loader, device, criterion, y_mean: float, y_std: float,
-               optimiser=None, desc: str = ""):
-    """MSE is on the original excess. The network itself predicts the z-scored excess."""
+               y_lo: float, y_hi: float, optimiser=None, desc: str = "",
+               collect: bool = False):
+    """Loss is on the winsorized then z-scored excess. Logged mse uses that same clip."""
     train_mode = optimiser is not None
     model.train(train_mode)
     total_se = 0.0
     correct = 0
     seen = 0
+    preds: list[np.ndarray] = []
+    ys: list[np.ndarray] = []
     it = tqdm(loader, desc=desc or ("train" if train_mode else "valid"),
               leave=False, mininterval=2.0)
     for xb, yb in it:
         xb = xb.to(device, non_blocking=True)
         y_raw = yb.to(device, non_blocking=True).float().view(-1)
-        y_z = (y_raw - y_mean) / y_std
+        y_clip = torch.clamp(y_raw, y_lo, y_hi)
+        y_z = (y_clip - y_mean) / y_std
         if train_mode:
             optimiser.zero_grad(set_to_none=True)
         pred_z = model(xb).view(-1)
@@ -156,11 +194,18 @@ def _run_epoch(model, loader, device, criterion, y_mean: float, y_std: float,
             loss.backward()
             optimiser.step()
         pred_raw = pred_z.detach() * y_std + y_mean
-        total_se += torch.sum((pred_raw - y_raw) ** 2).item()
+        total_se += torch.sum((pred_raw - y_clip) ** 2).item()
         correct += ((pred_raw > 0) == (y_raw > 0)).sum().item()
         seen += xb.size(0)
+        if collect:
+            preds.append(pred_raw.detach().cpu().numpy())
+            ys.append(y_raw.detach().cpu().numpy())
     n = max(seen, 1)
-    return total_se / n, correct / n
+    mse = total_se / n
+    direction = correct / n
+    if collect:
+        return mse, direction, np.concatenate(preds), np.concatenate(ys)
+    return mse, direction
 
 
 def _save_ckpt(out_path: Path, payload: dict) -> None:
@@ -194,15 +239,18 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
     y_all = labels_df[TARGET_COL].to_numpy(np.float32)
     rng.shuffle(train_idx)
     y_train = y_all[train_idx]
-    y_mean = float(y_train.mean())
-    y_std = float(y_train.std())
+    y_lo, y_hi = _winsor_bounds(y_train, cfg)
+    y_w = np.clip(y_train, y_lo, y_hi)
+    y_mean = float(y_w.mean())
+    y_std = float(y_w.std())
     if not np.isfinite(y_std) or y_std <= 0:
         y_std = 1.0
 
     print(f"[seed {seed}] device={device}  regression target={TARGET_COL}  "
           f"train={len(train_idx)}  valid={len(valid_idx)}", flush=True)
-    print(f"[seed {seed}] target mean={y_mean:.6f} std={y_std:.6f}  "
-          f"（网络拟合标准化后的超额，日志里的 mse 是原始超额）", flush=True)
+    print(f"[seed {seed}] winsor [{y_lo:.6f}, {y_hi:.6f}]  "
+          f"target mean={y_mean:.6f} std={y_std:.6f}  "
+          f"（损失用截尾后再标准化；选模型用原始超额的 Spearman）", flush=True)
 
     print(f"[seed {seed}] fitting pixel stats ...", flush=True)
     mean, std = fit_pixel_stats_indexed(images, train_idx)
@@ -233,7 +281,8 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
     criterion = nn.MSELoss()
 
     max_epochs = int(cfg.cnn.max_epochs)
-    best_val = float("inf")
+    best_ic = -float("inf")
+    best_val = float("nan")
     best_val_dir = float("nan")
     best_epoch = 0
     best_state = None
@@ -241,22 +290,24 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
     t0 = time.time()
     running_path = out_path.with_name(out_path.stem + ".running.pt")
     print(f"[seed {seed}] fixed {max_epochs} epochs, no early stop, "
-          f"keep lowest valid mse", flush=True)
+          f"keep highest valid Spearman IC", flush=True)
     for epoch in range(1, max_epochs + 1):
         print(f"[seed {seed}] start epoch {epoch}/{max_epochs}", flush=True)
         tr_mse, tr_dir = _run_epoch(
-            model, dl_train, device, criterion, y_mean, y_std, optimiser,
+            model, dl_train, device, criterion, y_mean, y_std, y_lo, y_hi, optimiser,
             desc=f"seed{seed} ep{epoch} train")
-        va_mse, va_dir = _run_epoch(
-            model, dl_valid, device, criterion, y_mean, y_std, None,
-            desc=f"seed{seed} ep{epoch} valid")
+        va_mse, va_dir, va_pred, va_y = _run_epoch(
+            model, dl_valid, device, criterion, y_mean, y_std, y_lo, y_hi, None,
+            desc=f"seed{seed} ep{epoch} valid", collect=True)
+        va_ic = _spearman(va_pred, va_y)
         hist.append({
             "epoch": epoch,
             "train_mse": tr_mse, "train_dir": tr_dir,
-            "valid_mse": va_mse, "valid_dir": va_dir,
+            "valid_mse": va_mse, "valid_dir": va_dir, "valid_ic": va_ic,
         })
-        improved = va_mse < best_val
+        improved = np.isfinite(va_ic) and va_ic > best_ic
         if improved:
+            best_ic = va_ic
             best_val = va_mse
             best_val_dir = va_dir
             best_epoch = epoch
@@ -264,16 +315,18 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
         mark = "  best" if improved else ""
         print(f"[seed {seed}] ep {epoch:02d}/{max_epochs}  "
               f"train mse={tr_mse:.6f} dir={tr_dir:.3f}  "
-              f"valid mse={va_mse:.6f} dir={va_dir:.3f}  "
+              f"valid mse={va_mse:.6f} dir={va_dir:.3f} ic={va_ic:.4f}  "
               f"best_epoch={best_epoch}{mark}", flush=True)
         payload = {
             "state_dict": best_state,
             "mean": mean, "std": std,
             "y_mean": y_mean, "y_std": y_std,
+            "winsor_lo": y_lo, "winsor_hi": y_hi,
             "seed": seed, "window": window_key,
             "task": "regression", "target": TARGET_COL,
             "history": hist, "best_epoch": best_epoch,
             "best_val_mse": best_val, "best_val_dir": best_val_dir,
+            "best_val_ic": best_ic,
             "elapsed_s": time.time() - t0,
             "incomplete": True,
         }
@@ -288,21 +341,23 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
         "state_dict": best_state,
         "mean": mean, "std": std,
         "y_mean": y_mean, "y_std": y_std,
+        "winsor_lo": y_lo, "winsor_hi": y_hi,
         "seed": seed, "window": window_key,
         "task": "regression", "target": TARGET_COL,
         "history": hist, "best_epoch": best_epoch,
         "best_val_mse": best_val, "best_val_dir": best_val_dir,
+        "best_val_ic": best_ic,
         "epochs": len(hist), "elapsed_s": elapsed,
     })
     if running_path.exists():
         running_path.unlink()
     print(f"[seed {seed}] saved {out_path}  best_epoch={best_epoch}/{len(hist)}  "
-          f"val_mse={best_val:.6f} val_dir={best_val_dir:.4f}  {elapsed:.1f}s",
+          f"val_ic={best_ic:.4f} val_mse={best_val:.6f} val_dir={best_val_dir:.4f}  {elapsed:.1f}s",
           flush=True)
     return {
         "seed": seed, "best_epoch": best_epoch, "best_val_mse": best_val,
-        "best_val_dir": best_val_dir, "epochs": len(hist),
-        "elapsed_s": elapsed, "path": str(out_path),
+        "best_val_dir": best_val_dir, "best_val_ic": best_ic,
+        "epochs": len(hist), "elapsed_s": elapsed, "path": str(out_path),
     }
 
 
@@ -318,7 +373,7 @@ def train_window(cfg, paths, window_key: str = WINDOW_KEY, n_seeds: int = 5,
     model_dir = resolve_model_dir(paths, cfg, window_key)
     print("images =", img_dir)
     print("models =", model_dir)
-    print(f"epochs = {int(cfg.cnn.max_epochs)}  （固定轮数，不早停，按验证集 mse 留最好一轮）")
+    print(f"epochs = {int(cfg.cnn.max_epochs)}  （固定轮数，不早停，按验证集 Spearman IC 留最好一轮）")
     images = np.load(img_dir / "images.npy", mmap_mode="r")
     labels = pd.read_parquet(img_dir / "labels.parquet")
     print("loaded", images.shape, "labels", len(labels), labels["split"].value_counts().to_dict())
@@ -773,7 +828,7 @@ def plot_top10_excess(cfg, paths, window_key: str = WINDOW_KEY,
     ax.axhline(0.0, color="black", lw=0.7)
     ax.set_ylabel("Cumulative excess vs 688 pingquan (%)")
     ax.set_title(
-        f"CNN-{window_key} reg top {top_frac:.0%}  "
+        f"CNN-{window_key} gray body top {top_frac:.0%}  "
         f"{n_sleeves}-sleeve daily MTM excess (gross)  "
         f"ann={ann:.2%}  sharpe={sharpe:.2f}")
     ax.grid(True, alpha=0.25)
@@ -839,7 +894,7 @@ def plot_top10_gross_net(cfg, paths, window_key: str = WINDOW_KEY,
     ax.axhline(0.0, color="black", lw=0.7)
     ax.set_ylabel("Cumulative excess vs 688 pingquan (%)")
     ax.set_title(
-        f"CNN-{window_key} reg top {top_frac:.0%}  "
+        f"CNN-{window_key} gray body top {top_frac:.0%}  "
         f"{n_sleeves}-sleeve daily MTM  gross vs net")
     ax.legend(frameon=False)
     ax.grid(True, alpha=0.25)
@@ -913,7 +968,7 @@ def plot_random_groups(cfg, paths, window_key: str = WINDOW_KEY, n_groups: int =
         ax.plot(drawn.index, drawn.values * 100, color="black", lw=2.3,
                 label="所选平权-688", zorder=5)
     ax.axhline(0.0, color="black", lw=0.7)
-    ax.set_title(f"{window_key} random {n_groups} groups  ({n_sleeves}-sleeve daily MTM)")
+    ax.set_title(f"{window_key} gray body {n_groups} groups  ({n_sleeves}-sleeve daily MTM)")
     ax.set_ylabel("Cumulative excess vs pingquan (%)")
     ax.legend(frameon=False, ncol=5)
     ax.grid(True, alpha=0.25)

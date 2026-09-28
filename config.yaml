@@ -5,10 +5,9 @@ project:
 paths:
   processed: "/home/shixi05/ChenSiwei/0914/data/processed"
   images: data/images
-  # 已生成的 RGB 图，和二分类那一版同一目录，不重新生成。
-  images_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_rgb_I20"
-  # 回归的权重和预测写到旁边，不覆盖二分类的 models / results。
-  output_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_rgb_I20_reg"
+  # 这一版重新生成的灰度图。不要覆盖 k_pictures_rgb_I20 和 k_pictures_gray_reg。
+  images_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body"
+  output_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body"
   pingquan_csv: "/storage/server/227server/marketdata/pingquan/daily/pingquan.csv"
   figures: figures
   logs: logs
@@ -31,6 +30,7 @@ universe:
   exclude_suspension_in_window: true
 
 image:
+  channels: 1
   windows: {I20: 20, I60: 60}
   height: 100
   px_per_day: 3
@@ -41,10 +41,14 @@ image:
   macd_fast: 12
   macd_slow: 26
   macd_signal: 9
+  macd_warmup: 105
 
 cnn:
   task: regression
   target: future_ret
+  in_channels: 1
+  winsor_quantiles: [0.01, 0.99]
+  select: spearman
   conv_kernel:  [5, 3]
   conv_stride:  [3, 1]
   conv_padding: [12, 1]

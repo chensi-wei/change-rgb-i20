@@ -1,4 +1,4 @@
-"""RGB CNN for I20 (100x60) and I60 (100x180). One linear output: predicted excess."""
+"""1-channel CNN for I20 (100x60) and I60 (100x180). One linear output: predicted excess."""
 from __future__ import annotations
 
 import torch
@@ -24,13 +24,13 @@ class ConvBlock(nn.Module):
 
 
 class CNNPriceImage(nn.Module):
-    def __init__(self, filters: list[int], n_out: int = 1,
+    def __init__(self, filters: list[int], n_out: int = 1, in_ch: int = 1,
                  dropout_fc: float = 0.5,
                  conv_kernel=(5, 3), conv_stride=(3, 1), conv_padding=(12, 1),
                  pool_kernel=(2, 1), leaky_slope: float = 0.01):
         super().__init__()
         layers: list[nn.Module] = []
-        in_ch = 3
+        in_ch = int(in_ch)
         for out_ch in filters:
             layers.append(ConvBlock(
                 in_ch, out_ch,
@@ -74,9 +74,14 @@ def build_model(window_key: str, cfg) -> CNNPriceImage:
         height = 100
         width = {"I20": 60, "I60": 180}[window_key]
     filters = list(getattr(cnn_cfg.filters, window_key))
+    if hasattr(cfg, "image"):
+        in_ch = int(getattr(cnn_cfg, "in_channels", getattr(cfg.image, "channels", 1)))
+    else:
+        in_ch = int(getattr(cnn_cfg, "in_channels", 1))
     model = CNNPriceImage(
         filters=filters,
         n_out=1,
+        in_ch=in_ch,
         dropout_fc=float(cnn_cfg.dropout_fc),
         conv_kernel=tuple(cnn_cfg.conv_kernel),
         conv_stride=tuple(cnn_cfg.conv_stride),
@@ -85,6 +90,6 @@ def build_model(window_key: str, cfg) -> CNNPriceImage:
         leaky_slope=float(cnn_cfg.leaky_relu_slope),
     )
     with torch.no_grad():
-        _ = model(torch.zeros(1, 3, height, width))
+        _ = model(torch.zeros(1, in_ch, height, width))
     init_weights(model)
     return model

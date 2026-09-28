@@ -115,7 +115,7 @@ def plot_decile_dashboard(cfg, paths, window_key: str = "I20", n_deciles: int = 
 
     ax.axhline(0.0, color="#222222", lw=0.8)
     ax.set_ylabel("累计超额 (%)")
-    ax.set_title(f"{window_key} reg  {n_sleeves}-sleeve", loc="left", fontsize=13, pad=10)
+    ax.set_title(f"{window_key} gray body  {n_sleeves}-sleeve", loc="left", fontsize=13, pad=10)
     ax.grid(True, axis="y", color="#EEEEEE", lw=0.7)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
