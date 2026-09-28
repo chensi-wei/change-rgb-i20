@@ -1,4 +1,4 @@
-"""Daily grayscale images for I20 or I60. Filters and labels match no_rolling."""
+"""Weekly grayscale images. Twenty finished weeks, rebalance on the week-end session."""
 from __future__ import annotations
 
 import json
@@ -13,13 +13,42 @@ from tqdm import tqdm
 from draw_gray import macd_window, render_gray
 
 _WP: dict = {}
-REMOTE_IMAGES = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body")
+REMOTE_IMAGES = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_week")
 
 
 def daily_rebalance_dates(cal: pd.DatetimeIndex, start: str, end: str
                           ) -> pd.DatetimeIndex:
     """Every trading day in [start, end] is a formation / 调仓日."""
     td = cal[(cal >= pd.Timestamp(start)) & (cal <= pd.Timestamp(end))]
+    if len(td) == 0:
+        return pd.DatetimeIndex([])
+    return pd.DatetimeIndex(sorted(pd.unique(td)))
+
+
+def market_weeks(cal: pd.DatetimeIndex) -> tuple[np.ndarray, np.ndarray]:
+    """ISO weeks on the exchange calendar.
+
+    Each week is the sessions that actually traded. The end date is that
+    week's last session, which is the only rebalance day.
+    """
+    cal = pd.DatetimeIndex(pd.to_datetime(cal)).sort_values().unique()
+    if len(cal) == 0:
+        empty = np.array([], dtype="datetime64[ns]")
+        return empty, empty
+    iso = pd.Series(cal).dt.isocalendar()
+    key = iso["year"].to_numpy(np.int64) * 100 + iso["week"].to_numpy(np.int64)
+    change = np.flatnonzero(np.diff(key)) + 1
+    bounds = np.concatenate([[0], change, [len(cal)]])
+    starts = np.asarray(cal[bounds[:-1]], dtype="datetime64[ns]")
+    ends = np.asarray(cal[bounds[1:] - 1], dtype="datetime64[ns]")
+    return starts, ends
+
+
+def week_end_rebalance_dates(week_ends: np.ndarray, start: str, end: str
+                             ) -> pd.DatetimeIndex:
+    """Last trading session of each ISO week inside [start, end]."""
+    ends = pd.DatetimeIndex(pd.to_datetime(week_ends))
+    td = ends[(ends >= pd.Timestamp(start)) & (ends <= pd.Timestamp(end))]
     if len(td) == 0:
         return pd.DatetimeIndex([])
     return pd.DatetimeIndex(sorted(pd.unique(td)))
@@ -65,7 +94,166 @@ def _window_prices(o_all, h_all, l_all, c_all, ret_all, vol_all,
     return o, h, l, c_path, v
 
 
+def _week_spans(dates: np.ndarray, week_starts: np.ndarray, week_ends: np.ndarray
+                ) -> dict[int, tuple[int, int]]:
+    """Map market-week index to [start, end) rows in this stock's daily arrays."""
+    n_weeks = len(week_ends)
+    if n_weeks == 0 or len(dates) == 0:
+        return {}
+    wix = np.searchsorted(week_ends, dates, side="left")
+    clipped = np.clip(wix, 0, n_weeks - 1)
+    inside = (
+        (wix < n_weeks)
+        & (dates >= week_starts[clipped])
+        & (dates <= week_ends[clipped])
+    )
+    rows = np.flatnonzero(inside)
+    if len(rows) == 0:
+        return {}
+    wix = wix[rows]
+    cuts = np.flatnonzero(np.diff(wix)) + 1
+    bounds = np.concatenate([[0], cuts, [len(rows)]])
+    spans: dict[int, tuple[int, int]] = {}
+    for a, b in zip(bounds[:-1], bounds[1:]):
+        spans[int(wix[a])] = (int(rows[a]), int(rows[b - 1]) + 1)
+    return spans
+
+
+def _gen_one_stock_week(payload: tuple):
+    """One sample per week-end session. Each bar is a finished market week."""
+    p = _WP
+    window = int(p["window"])
+    horizon = int(p["horizon"])
+    ipo_buffer = int(p["ipo_buffer_days"])
+    excl_reb = p["excl_reb"]
+    count_only = p["count_only"]
+    has_limit = p["has_limit"]
+    excl_st_window = p["excl_st_window"]
+    has_st = p["has_st"]
+    require_volume = p["require_volume"]
+    draw_kw = p["draw_kw"]
+    macd_warmup = int(p.get("macd_warmup", 105))
+    week_starts = p["week_starts"]
+    week_ends = p["week_ends"]
+    cal_dates = p["cal_dates"]
+
+    (code, dates, o_all, h_all, l_all, c_all, ret_all, vol_all,
+     lu, ld, st, _olu, _market_pos, reb_ix, mkt_all) = payload
+    dates = np.asarray(dates, dtype="datetime64[ns]")
+    n = len(dates)
+    spans_all = _week_spans(dates, week_starts, week_ends)
+    if not spans_all:
+        return None, []
+    earliest = min(spans_all)
+
+    imgs: list[np.ndarray] = []
+    meta: list[tuple] = []
+    for end_ix in reb_ix:
+        t = dates[int(end_ix)]
+        wi = int(np.searchsorted(week_ends, t, side="left"))
+        if wi >= len(week_ends) or week_ends[wi] != t:
+            continue
+        first_wi = wi - window + 1
+        if first_wi < 0:
+            continue
+        if ipo_buffer > 0 and earliest > first_wi - ipo_buffer:
+            continue
+        spans = []
+        missing = False
+        for k in range(first_wi, wi + 1):
+            sp = spans_all.get(k)
+            if sp is None:
+                missing = True
+                break
+            spans.append(sp)
+        if missing:
+            continue
+        if has_limit and excl_reb and (bool(lu[end_ix]) or bool(ld[end_ix])):
+            continue
+        if int(spans[-1][1]) - 1 != int(end_ix):
+            continue
+
+        ci = int(np.searchsorted(cal_dates, t, side="left"))
+        if ci >= len(cal_dates) or cal_dates[ci] != t or ci + horizon >= len(cal_dates):
+            continue
+        fwd_dates = cal_dates[ci + 1:ci + 1 + horizon]
+        sidx = np.searchsorted(dates, fwd_dates, side="left")
+        if np.any(sidx >= n) or not np.array_equal(dates[sidx], fwd_dates):
+            continue
+        fwd_rets = ret_all[sidx]
+        fwd_mkt = mkt_all[sidx]
+        if not (np.all(np.isfinite(fwd_rets)) and np.all(np.isfinite(fwd_mkt))):
+            continue
+        if has_st and excl_st_window and st[spans[-1][0]:int(sidx[-1]) + 1].any():
+            continue
+        if require_volume:
+            if any(not np.all(np.isfinite(vol_all[a:b])) for a, b in spans):
+                continue
+
+        o = np.empty(window, dtype=np.float64)
+        h = np.empty(window, dtype=np.float64)
+        l = np.empty(window, dtype=np.float64)
+        c = np.empty(window, dtype=np.float64)
+        v = np.empty(window, dtype=np.float64)
+        for i, (a, b) in enumerate(spans):
+            o[i] = o_all[a]
+            h[i] = np.nanmax(h_all[a:b])
+            l[i] = np.nanmin(l_all[a:b])
+            c[i] = c_all[b - 1]
+            v[i] = float(np.sum(vol_all[a:b]))
+        if not np.all(np.isfinite(o) & np.isfinite(h) & np.isfinite(l) & np.isfinite(c)):
+            continue
+
+        stock_ret = float(np.prod(1.0 + fwd_rets) - 1.0)
+        mkt_ret = float(np.prod(1.0 + fwd_mkt) - 1.0)
+        excess = stock_ret - mkt_ret
+        meta.append((code, dates[end_ix], excess, 1 if excess > 0 else 0,
+                     stock_ret, mkt_ret))
+        if count_only:
+            continue
+
+        warm: list[float] = []
+        k = first_wi - 1
+        while k >= 0 and len(warm) < macd_warmup:
+            sp = spans_all.get(k)
+            if sp is None:
+                break
+            warm.append(float(c_all[sp[1] - 1]))
+            k -= 1
+        warm.reverse()
+        closes_ext = np.concatenate([np.asarray(warm, dtype=np.float64), c])
+        rets = np.zeros(len(closes_ext), dtype=np.float64)
+        prev = closes_ext[:-1]
+        nxt = closes_ext[1:]
+        good = np.isfinite(prev) & (prev != 0.0) & np.isfinite(nxt)
+        rets[1:] = np.where(good, nxt / prev - 1.0, 0.0)
+        start_i = len(closes_ext) - window
+        dif, dea, hist = macd_window(
+            rets, start_i, len(closes_ext) - 1,
+            fast=int(draw_kw["macd_fast"]),
+            slow=int(draw_kw["macd_slow"]),
+            signal=int(draw_kw["macd_signal"]),
+            warmup=start_i,
+        )
+        ret_w = np.zeros(window, dtype=np.float64)
+        prev_c = c[:-1]
+        good_c = np.isfinite(prev_c) & (prev_c != 0.0)
+        ret_w[1:] = np.where(good_c, c[1:] / prev_c - 1.0, 0.0)
+        c_path = np.cumprod(1.0 + ret_w)
+        scale = c_path / c
+        imgs.append(render_gray(
+            o * scale, h * scale, l * scale, c_path, v, dif, dea, hist, **draw_kw))
+
+    if not imgs:
+        return None, meta
+    stacked = np.stack(imgs, axis=0)
+    stacked = np.ascontiguousarray(stacked[:, None, :, :])
+    return stacked, meta
+
+
 def _gen_one_stock(payload: tuple):
+    if _WP.get("bar") == "week":
+        return _gen_one_stock_week(payload)
     p = _WP
     window = p["window"]
     horizon = p["horizon"]
@@ -428,6 +616,10 @@ def generate_images(
     require_volume: bool = True,
     use_remote="auto",
 ) -> dict:
+    bar = str(getattr(cfg.image, "bar", "day"))
+    if bar != "week":
+        raise RuntimeError(
+            f"gray-week 只生成周 K，config.image.bar 应为 week，实际是 {bar!r}")
     spec = _image_cfg(cfg, window_key)
     window_key = spec["window_key"]
     window = spec["window"]
@@ -480,10 +672,14 @@ def generate_images(
         cal = pd.DatetimeIndex([])
         calpos_lookup = None
 
-    reb_dates = daily_rebalance_dates(cal, cfg.data.train_start, cfg.data.test_end)
-    print(f"rebalance=daily  n_dates={len(reb_dates)}  "
+    if len(cal) == 0:
+        raise RuntimeError("trading_calendar.parquet 是空的，无法切周")
+    week_starts, week_ends = market_weeks(cal)
+    reb_dates = week_end_rebalance_dates(week_ends, cfg.data.train_start, cfg.data.test_end)
+    print(f"rebalance=week-end  n_dates={len(reb_dates)}  "
           f"{None if len(reb_dates) == 0 else reb_dates.min().date()}→"
-          f"{None if len(reb_dates) == 0 else reb_dates.max().date()}")
+          f"{None if len(reb_dates) == 0 else reb_dates.max().date()}  "
+          f"weeks={len(week_ends)}")
     reb_vals = pd.DatetimeIndex(reb_dates).values.astype("datetime64[ns]")
 
     train_start = pd.Timestamp(cfg.data.train_start)
@@ -545,6 +741,10 @@ def generate_images(
         has_open_cap=has_open_cap, require_volume=require_volume,
         draw_kw=spec["draw_kw"],
         macd_warmup=int(getattr(cfg.image, "macd_warmup", 105)),
+        bar="week",
+        week_starts=np.asarray(week_starts, dtype="datetime64[ns]"),
+        week_ends=np.asarray(week_ends, dtype="datetime64[ns]"),
+        cal_dates=np.asarray(cal, dtype="datetime64[ns]"),
     )
 
     all_meta: list[tuple] = []
@@ -559,7 +759,7 @@ def generate_images(
     import tempfile
     shard_dir = None
     if not count_only:
-        shard_dir = Path(tempfile.mkdtemp(prefix=f"{window_key}_gray_shards_"))
+        shard_dir = Path(tempfile.mkdtemp(prefix=f"{window_key}_week_shards_"))
         print(f"shard dir (local) = {shard_dir}")
 
     if count_only:
@@ -611,10 +811,11 @@ def generate_images(
         columns=["code", "date", "future_ret", "label", "stock_ret", "mkt_ret"])
     meta_df["date"] = pd.to_datetime(meta_df["date"])
     ratio = float(getattr(cfg.data, "train_valid_split", 0.7))
+    embargo = int(getattr(cfg.image, "embargo_days", window * 5))
     meta_df = assign_nonoverlapping_tv_splits(
-        meta_df, cal, window,
+        meta_df, cal, embargo,
         train_start, train_end, test_start, test_end, ratio=ratio)
-    assert_no_split_kline_overlap(meta_df, cal, window)
+    assert_no_split_kline_overlap(meta_df, cal, embargo)
     info["split"] = meta_df["split"].value_counts().to_dict()
     info["n_obs"] = len(meta_df)
 
@@ -630,6 +831,8 @@ def generate_images(
         "height": height,
         "width": width,
         "channels": 1,
+        "bar": "week",
+        "embargo_days": int(getattr(cfg.image, "embargo_days", window * 5)),
         "price_rows": int(cfg.image.price_rows),
         "volume_rows": int(cfg.image.volume_rows),
         "macd_rows": int(cfg.image.macd_rows),
@@ -730,7 +933,8 @@ def verify_images(cfg, paths: dict, window_key: str = "I20",
     if cal_path.exists() and len(train):
         cal = pd.DatetimeIndex(
             pd.to_datetime(pd.read_parquet(cal_path)["trade_date"]).sort_values())
-        assert_no_split_kline_overlap(labels, cal, window)
+        embargo = int(getattr(cfg.image, "embargo_days", window * 5))
+        assert_no_split_kline_overlap(labels, cal, embargo)
     if len(train):
         print(f"[INFO] train {train['date'].min().date()}→{train['date'].max().date()}  "
               f"n={len(train)}")
@@ -767,7 +971,7 @@ def verify_images(cfg, paths: dict, window_key: str = "I20",
             fontsize=7)
         ax.axis("off")
     fig_path = fig_dir / f"verify_{window_key}.png"
-    fig.suptitle(f"{window_key} gray body {height}x{width}", fontsize=12)
+    fig.suptitle(f"{window_key} gray week {height}x{width}", fontsize=12)
     fig.tight_layout()
     fig.savefig(fig_path, dpi=120, bbox_inches="tight")
     plt.close(fig)

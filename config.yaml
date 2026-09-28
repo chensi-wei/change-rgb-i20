@@ -5,9 +5,9 @@ project:
 paths:
   processed: "/home/shixi05/ChenSiwei/0914/data/processed"
   images: data/images
-  # 这一版重新生成的灰度图。不要覆盖 k_pictures_rgb_I20 和 k_pictures_gray_reg。
-  images_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body"
-  output_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body"
+  # 周 K。不要覆盖 k_pictures_gray_body、k_pictures_rgb_I20、k_pictures_gray_reg。
+  images_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_week"
+  output_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_week"
   pingquan_csv: "/storage/server/227server/marketdata/pingquan/daily/pingquan.csv"
   figures: figures
   logs: logs
@@ -30,8 +30,11 @@ universe:
   exclude_suspension_in_window: true
 
 image:
+  bar: week
   channels: 1
   windows: {I20: 20, I60: 60}
+  # 20 根周 K 最多跨 100 个交易日。训练/验证/测试之间空出这么多天，避免同一根周 K 进两个集合。
+  embargo_days: 100
   height: 100
   px_per_day: 3
   price_rows: 70
@@ -65,8 +68,11 @@ cnn:
   max_epochs: 10
 
 backtest:
-  rebalance_freq: "D"
+  rebalance_freq: "W"
+  # 持有 5 个交易日，正常一周只开着 1 个组合。槽位留 5 个，是为了短周（间隔不到 5 天）
+  # 和还没到期的持仓重叠时，两笔收益都记上。不满 1 个组合的日期才丢掉。
   n_sleeves: 5
+  min_sleeves: 1
   top_frac: 0.10
   deciles: 10
   trading_days_per_year: 252

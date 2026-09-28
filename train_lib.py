@@ -19,8 +19,8 @@ from tqdm import tqdm
 
 from cnn import build_model
 
-REMOTE = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body")
-OUTPUT_REMOTE = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body")
+REMOTE = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_week")
+OUTPUT_REMOTE = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_week")
 WINDOW_KEY = "I20"
 TARGET_COL = "future_ret"
 
@@ -500,10 +500,11 @@ def prepend_zero_cum(daily_ret: pd.Series) -> pd.Series:
     return pd.concat([pd.Series([0.0], index=pd.DatetimeIndex([t0])), cum])
 
 
-def _horizon_sleeves(cfg) -> tuple[int, int]:
+def _horizon_sleeves(cfg) -> tuple[int, int, int]:
     h = int(getattr(cfg.image, "return_horizon_days", 5))
     n = int(getattr(cfg.backtest, "n_sleeves", h))
-    return max(1, h), max(1, n)
+    m = int(getattr(cfg.backtest, "min_sleeves", n))
+    return max(1, h), max(1, n), max(1, m)
 
 
 def load_pingquan_688(path: str | Path) -> pd.Series:
@@ -752,6 +753,7 @@ def overlapping_group_excess(
     pred: pd.DataFrame, group_col: str,
     ret_wide: pd.DataFrame, mkt: pd.Series, cal: pd.DatetimeIndex,
     horizon: int = 5, n_sleeves: int | None = None,
+    min_sleeves: int | None = None,
 ) -> pd.DataFrame:
     """One overlapping-sleeve daily excess series per group value."""
     series = {}
@@ -759,7 +761,7 @@ def overlapping_group_excess(
         baskets = formation_baskets_group(pred, group_col, gval)
         daily = overlapping_sleeve_daily(
             baskets, ret_wide, mkt, cal,
-            horizon=horizon, n_sleeves=n_sleeves)
+            horizon=horizon, n_sleeves=n_sleeves, min_sleeves=min_sleeves)
         if daily.empty:
             continue
         series[gval] = daily["daily_excess"]
@@ -787,7 +789,7 @@ def plot_top10_excess(cfg, paths, window_key: str = WINDOW_KEY,
     window_key = normalize_window_key(window_key)
     if top_frac is None:
         top_frac = float(getattr(cfg.backtest, "top_frac", 0.10))
-    horizon, n_sleeves = _horizon_sleeves(cfg)
+    horizon, n_sleeves, min_sleeves = _horizon_sleeves(cfg)
     results_dir = resolve_results_dir(paths, cfg)
     pred = _load_test_pred(paths, cfg, window_key)
 
@@ -795,7 +797,7 @@ def plot_top10_excess(cfg, paths, window_key: str = WINDOW_KEY,
     ret_wide, mkt, cal = load_backtest_market(cfg, paths)
     daily = overlapping_sleeve_daily(
         baskets, ret_wide, mkt, cal,
-        horizon=horizon, n_sleeves=n_sleeves, min_sleeves=n_sleeves)
+        horizon=horizon, n_sleeves=n_sleeves, min_sleeves=min_sleeves)
     if daily.empty:
         raise RuntimeError(f"{window_key}: 没有满仓后的逐日超额（检查 pred / prices / 日历）")
 
@@ -828,8 +830,8 @@ def plot_top10_excess(cfg, paths, window_key: str = WINDOW_KEY,
     ax.axhline(0.0, color="black", lw=0.7)
     ax.set_ylabel("Cumulative excess vs 688 pingquan (%)")
     ax.set_title(
-        f"CNN-{window_key} gray body top {top_frac:.0%}  "
-        f"{n_sleeves}-sleeve daily MTM excess (gross)  "
+        f"CNN-{window_key} gray week top {top_frac:.0%}  "
+        f"week-end entry, {horizon}d hold, min sleeves {min_sleeves}  "
         f"ann={ann:.2%}  sharpe={sharpe:.2f}")
     ax.grid(True, alpha=0.25)
     fig.tight_layout()
@@ -858,7 +860,7 @@ def plot_top10_gross_net(cfg, paths, window_key: str = WINDOW_KEY,
     window_key = normalize_window_key(window_key)
     if top_frac is None:
         top_frac = float(getattr(cfg.backtest, "top_frac", 0.10))
-    horizon, n_sleeves = _horizon_sleeves(cfg)
+    horizon, n_sleeves, min_sleeves = _horizon_sleeves(cfg)
     results_dir = resolve_results_dir(paths, cfg)
     pred = _load_test_pred(paths, cfg, window_key)
 
@@ -866,7 +868,7 @@ def plot_top10_gross_net(cfg, paths, window_key: str = WINDOW_KEY,
     ret_wide, mkt, cal = load_backtest_market(cfg, paths)
     kwargs = dict(
         baskets=baskets, ret_wide=ret_wide, mkt=mkt, cal=cal,
-        horizon=horizon, n_sleeves=n_sleeves, min_sleeves=n_sleeves)
+        horizon=horizon, n_sleeves=n_sleeves, min_sleeves=min_sleeves)
     gross = overlapping_sleeve_daily(**kwargs, cost_bps_per_side=0.0)
     net = overlapping_sleeve_daily(**kwargs, cost_bps_per_side=cost_bps_per_side)
     if gross.empty or net.empty:
@@ -894,8 +896,8 @@ def plot_top10_gross_net(cfg, paths, window_key: str = WINDOW_KEY,
     ax.axhline(0.0, color="black", lw=0.7)
     ax.set_ylabel("Cumulative excess vs 688 pingquan (%)")
     ax.set_title(
-        f"CNN-{window_key} gray body top {top_frac:.0%}  "
-        f"{n_sleeves}-sleeve daily MTM  gross vs net")
+        f"CNN-{window_key} gray week top {top_frac:.0%}  "
+        f"week-end entry, {horizon}d hold  gross vs net")
     ax.legend(frameon=False)
     ax.grid(True, alpha=0.25)
     fig.tight_layout()
@@ -940,11 +942,11 @@ def plot_random_groups(cfg, paths, window_key: str = WINDOW_KEY, n_groups: int =
     pred = _load_test_pred(paths, cfg, window_key)
     pred = assign_random_groups(pred, n_groups=n_groups,
                                 seed=int(cfg.project.random_seed))
-    horizon, n_sleeves = _horizon_sleeves(cfg)
+    horizon, n_sleeves, min_sleeves = _horizon_sleeves(cfg)
     ret_wide, mkt, cal = load_backtest_market(cfg, paths)
     rets = overlapping_group_excess(
         pred, "rand_group", ret_wide, mkt, cal,
-        horizon=horizon, n_sleeves=n_sleeves)
+        horizon=horizon, n_sleeves=n_sleeves, min_sleeves=min_sleeves)
     rets.columns = [f"R{int(c)}" for c in rets.columns]
     cols = [f"R{i}" for i in range(1, n_groups + 1) if f"R{i}" in rets.columns]
 
@@ -954,7 +956,7 @@ def plot_random_groups(cfg, paths, window_key: str = WINDOW_KEY, n_groups: int =
             g["code"].astype(str).str.zfill(6).tolist())
     uni = overlapping_sleeve_daily(
         baskets_all, ret_wide, mkt, cal,
-        horizon=horizon, n_sleeves=n_sleeves)
+        horizon=horizon, n_sleeves=n_sleeves, min_sleeves=min_sleeves)
     ew_xs = uni["daily_excess"] if not uni.empty else pd.Series(dtype=float)
 
     cmap = plt.cm.RdYlBu_r
@@ -968,7 +970,7 @@ def plot_random_groups(cfg, paths, window_key: str = WINDOW_KEY, n_groups: int =
         ax.plot(drawn.index, drawn.values * 100, color="black", lw=2.3,
                 label="所选平权-688", zorder=5)
     ax.axhline(0.0, color="black", lw=0.7)
-    ax.set_title(f"{window_key} gray body {n_groups} groups  ({n_sleeves}-sleeve daily MTM)")
+    ax.set_title(f"{window_key} gray week {n_groups} groups  (week-end, {horizon}d hold)")
     ax.set_ylabel("Cumulative excess vs pingquan (%)")
     ax.legend(frameon=False, ncol=5)
     ax.grid(True, alpha=0.25)

@@ -74,10 +74,11 @@ def plot_decile_dashboard(cfg, paths, window_key: str = "I20", n_deciles: int = 
     pred_d = assign_deciles(pred, n_deciles=n_deciles, score_col="pred")
     horizon = int(getattr(cfg.image, "return_horizon_days", 5))
     n_sleeves = int(getattr(cfg.backtest, "n_sleeves", horizon))
+    min_sleeves = int(getattr(cfg.backtest, "min_sleeves", n_sleeves))
     ret_wide, mkt, cal = load_backtest_market(cfg, paths)
     rets = overlapping_group_excess(
         pred_d, "decile", ret_wide, mkt, cal,
-        horizon=horizon, n_sleeves=n_sleeves)
+        horizon=horizon, n_sleeves=n_sleeves, min_sleeves=min_sleeves)
     rets.columns = [f"D{int(c)}" for c in rets.columns]
     days_per_year = int(getattr(cfg.backtest, "trading_days_per_year", 252))
 
@@ -115,7 +116,7 @@ def plot_decile_dashboard(cfg, paths, window_key: str = "I20", n_deciles: int = 
 
     ax.axhline(0.0, color="#222222", lw=0.8)
     ax.set_ylabel("累计超额 (%)")
-    ax.set_title(f"{window_key} gray body  {n_sleeves}-sleeve", loc="left", fontsize=13, pad=10)
+    ax.set_title(f"{window_key} gray week", loc="left", fontsize=13, pad=10)
     ax.grid(True, axis="y", color="#EEEEEE", lw=0.7)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
