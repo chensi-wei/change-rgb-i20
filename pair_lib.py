@@ -85,3 +85,17 @@ def fuse_inputs(cfg) -> list[str]:
             f"fuse.inputs 只能是 [day, week] 或对照用的 [day]，实际是 {inputs}"
         )
     return inputs
+
+
+def fuse_mode(cfg) -> str:
+    """day：只训日塔。residual：冻结日塔，周塔学残差。concat：旧的特征拼接。"""
+    inputs = fuse_inputs(cfg)
+    if inputs == ["day"]:
+        return "day"
+    raw = getattr(getattr(cfg, "fuse", None), "mode", None)
+    mode = "concat" if raw is None else str(raw)
+    if mode not in {"residual", "concat"}:
+        raise RuntimeError(
+            f"fuse.mode 只能是 residual 或 concat，实际是 {mode!r}"
+        )
+    return mode

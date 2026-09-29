@@ -1,8 +1,8 @@
-"""Two grayscale towers, concatenated, one linear output.
+"""Day tower plus an optional weekly residual.
 
-Day and week do not share weights. Features are concatenated, not added
-and not averaged. fuse.inputs [day] keeps the same head on the daily tower
-only, for the incremental comparison.
+residual: the day tower is frozen. The week tower is pooled to one vector
+and adds a scalar. That scalar starts at 0. concat is the previous
+feature-concatenation model. fuse.inputs [day] is the day tower alone.
 """
 from __future__ import annotations
 
@@ -84,6 +84,36 @@ class DayTower(nn.Module):
         return self.head(self.dropout(self.day.encode(day)))
 
 
+class WeekResidual(nn.Module):
+    """Conv stack, global average pool, one linear residual. Head starts at 0."""
+
+    def __init__(self, features: nn.Sequential, channels: int, dropout: float):
+        super().__init__()
+        self.features = features
+        self.pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.dropout = nn.Dropout(p=dropout)
+        self.head = nn.Linear(int(channels), 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.pool(self.features(x)).flatten(1)
+        return self.head(self.dropout(h))
+
+
+class ResidualFuse(nn.Module):
+    """Frozen day score plus a weekly residual in the same z-score space."""
+
+    def __init__(self, day: DayTower, week: WeekResidual):
+        super().__init__()
+        self.day = day
+        self.week = week
+
+    def forward(self, day: torch.Tensor, week: torch.Tensor) -> torch.Tensor:
+        self.day.eval()
+        with torch.no_grad():
+            base = self.day(day)
+        return base + self.week(week)
+
+
 def init_weights(module: nn.Module) -> None:
     for m in module.modules():
         if isinstance(m, (nn.Conv2d, nn.Linear)):
@@ -108,7 +138,12 @@ def _tower_kwargs(cnn_cfg, in_ch: int) -> dict:
     )
 
 
-def build_model(window_key: str, cfg):
+def _zero_week_head(model: ResidualFuse) -> None:
+    nn.init.zeros_(model.week.head.weight)
+    nn.init.zeros_(model.week.head.bias)
+
+
+def build_model(window_key: str, cfg, kind: str | None = None):
     """``cfg`` is the full config. Also accepts ``cfg.cnn`` from older notebooks."""
     if hasattr(cfg, "cnn"):
         cnn_cfg = cfg.cnn
@@ -125,24 +160,33 @@ def build_model(window_key: str, cfg):
         in_ch = int(getattr(cnn_cfg, "in_channels", getattr(cfg.image, "channels", 1)))
     else:
         in_ch = int(getattr(cnn_cfg, "in_channels", 1))
-    from pair_lib import fuse_inputs
-    inputs = fuse_inputs(cfg)
+    if kind is None:
+        from pair_lib import fuse_mode
+        kind = fuse_mode(cfg)
+    if kind not in {"day", "residual", "concat"}:
+        raise RuntimeError(f"模型只能是 day、residual 或 concat，实际是 {kind!r}")
     kw = _tower_kwargs(cnn_cfg, in_ch)
     blank = torch.zeros(1, in_ch, height, width)
-    if inputs == ["day", "week"]:
+    dropout = float(cnn_cfg.dropout_fc)
+    if kind == "concat":
         model = TwoTower(
             CNNPriceImage(filters, **kw),
             CNNPriceImage(filters, **kw),
-            dropout=float(cnn_cfg.dropout_fc),
+            dropout=dropout,
         )
-        with torch.no_grad():
-            _ = model(blank, blank.clone())
+    elif kind == "residual":
+        week_tower = CNNPriceImage(filters, **kw)
+        week_features = week_tower.features
+        del week_tower.features
+        model = ResidualFuse(
+            DayTower(CNNPriceImage(filters, **kw), dropout=dropout),
+            WeekResidual(week_features, channels=int(filters[-1]), dropout=dropout),
+        )
     else:
-        model = DayTower(
-            CNNPriceImage(filters, **kw),
-            dropout=float(cnn_cfg.dropout_fc),
-        )
-        with torch.no_grad():
-            _ = model(blank, blank.clone())
+        model = DayTower(CNNPriceImage(filters, **kw), dropout=dropout)
+    with torch.no_grad():
+        _ = model(blank, blank.clone())
     init_weights(model)
+    if kind == "residual":
+        _zero_week_head(model)
     return model

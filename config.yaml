@@ -10,8 +10,8 @@ paths:
   images_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body"
   # 每个已走完的周一张图。周一到周四复用最近的这一张。
   week_images_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_fuse_week"
-  # 权重、配对表、预测。不要写回 gray_body 或 gray_week。
-  output_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_fuse"
+  # 权重、配对表、预测。不要写回 gray_body、gray_week，也不要写进拼接那一版的 k_pictures_gray_fuse。
+  output_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_fuse_residual"
   pingquan_csv: "/storage/server/227server/marketdata/pingquan/daily/pingquan.csv"
   figures: figures
   logs: logs
@@ -69,7 +69,9 @@ cnn:
   max_epochs: 10
 
 fuse:
-  # [day, week] 是两个塔拼接。[day] 是同一批样本上的日 K 对照，用来看周 K 有没有增量。
+  # residual：日塔先训并冻结，周塔只在周末样本上学残差。concat 是旧的特征拼接。
+  # inputs 改成 [day] 时只训日塔，并且要换一个 output_remote。
+  mode: residual
   inputs: [day, week]
   # 20 根周 K 大约 100 个交易日。切分间隔按这个来，避免同一根周 K 出现在训练和验证里。
   embargo_days: 100

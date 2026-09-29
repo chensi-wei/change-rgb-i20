@@ -1,8 +1,9 @@
-"""Train the day+week fusion as a regression on 5-day excess.
+"""Train day and week images as a regression on 5-day excess.
 
-Each sample is two images. The weekly image is the last completed week.
-Fixed epochs. The kept epoch is the highest validation Spearman against the
-raw excess. The loss uses a winsorized, then z-scored target.
+residual: train the day tower first, freeze it, then fit a weekly residual
+on week-end rows only. The kept week epoch is the one whose validation
+top-group daily excess is at least the day tower's, with the higher Sharpe.
+concat and day keep the old rule: highest validation Spearman.
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ from cnn import build_model
 
 REMOTE = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body")
 WEEK_REMOTE = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_fuse_week")
-OUTPUT_REMOTE = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_fuse")
+OUTPUT_REMOTE = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_fuse_residual")
 WINDOW_KEY = "I20"
 TARGET_COL = "future_ret"
 
@@ -100,8 +101,11 @@ def resolve_results_dir(paths: dict, cfg) -> Path:
 
 
 def _seed_ckpts(model_dir: Path) -> list[Path]:
+    """Final ensemble files. Skips ``seed_k_day.pt`` and in-progress copies."""
     return sorted(
-        p for p in model_dir.glob("seed_*.pt") if ".running." not in p.name)
+        p for p in model_dir.glob("seed_*.pt")
+        if ".running." not in p.name and not p.stem.endswith("_day")
+    )
 
 
 class IndexedImageDataset(Dataset):
@@ -268,7 +272,8 @@ def _finite_mask(labels_df: pd.DataFrame, idx: np.ndarray) -> np.ndarray:
 
 def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
                    num_workers: int = 0, batch_size: int | None = None,
-                   pin_memory: bool = False, week_images=None) -> dict:
+                   pin_memory: bool = False, week_images=None,
+                   kind: str | None = None) -> dict:
     rng = np.random.default_rng(seed)
     device = _pick_device()
     window_key = normalize_window_key(window_key)
@@ -297,13 +302,18 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
           f"target mean={y_mean:.6f} std={y_std:.6f}  "
           f"（损失用截尾后再标准化；选模型用原始超额的 Spearman）", flush=True)
 
-    from pair_lib import fuse_inputs
-    inputs = fuse_inputs(cfg)
+    from pair_lib import fuse_mode
+    mode = fuse_mode(cfg) if kind is None else str(kind)
+    if mode == "residual":
+        raise RuntimeError("残差模型用 train_residual_seed，不要走 train_one_seed。")
+    if mode not in {"day", "concat"}:
+        raise RuntimeError(f"train_one_seed 只训 day 或 concat，实际是 {mode}")
+    inputs = ["day", "week"] if mode == "concat" else ["day"]
     if "day_row" not in labels_df.columns or "week_row" not in labels_df.columns:
         raise RuntimeError("labels 需要 day_row 和 week_row。先跑配对，不要直接用日 K 的 labels。")
     day_rows = labels_df["day_row"].to_numpy(np.int64)
     week_rows = labels_df["week_row"].to_numpy(np.int64)
-    read_week = "week" in inputs
+    read_week = mode == "concat"
     if read_week and week_images is None:
         raise RuntimeError("fuse.inputs 含 week，但没有周 K 图")
     print(f"[seed {seed}] fitting pixel stats ...  inputs={inputs}", flush=True)
@@ -336,11 +346,11 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
                           num_workers=num_workers, pin_memory=pin)
 
     torch.manual_seed(seed)
-    print(f"[seed {seed}] building model ...", flush=True)
+    print(f"[seed {seed}] building model ...  mode={mode}", flush=True)
     if not hasattr(cfg, "cnn"):
         root = getattr(getattr(cfg, "project", None), "root", ".")
         raise AttributeError(f"{root}/config.yaml 没有 cnn 段。")
-    model = build_model(window_key, cfg).to(device)
+    model = build_model(window_key, cfg, kind=mode).to(device)
     optimiser = torch.optim.Adam(model.parameters(), lr=float(cfg.cnn.optimizer.lr))
     criterion = nn.MSELoss()
 
@@ -386,6 +396,7 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
             "mean": mean, "std": std,
             "week_mean": w_mean, "week_std": w_std,
             "fuse_inputs": inputs,
+            "fuse_mode": mode,
             "y_mean": y_mean, "y_std": y_std,
             "winsor_lo": y_lo, "winsor_hi": y_hi,
             "seed": seed, "window": window_key,
@@ -408,6 +419,7 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
         "mean": mean, "std": std,
         "week_mean": w_mean, "week_std": w_std,
         "fuse_inputs": inputs,
+        "fuse_mode": mode,
         "y_mean": y_mean, "y_std": y_std,
         "winsor_lo": y_lo, "winsor_hi": y_hi,
         "seed": seed, "window": window_key,
@@ -504,6 +516,286 @@ def load_paired_frame(cfg, paths, window_key: str):
     return day_images, week_images, paired
 
 
+def _torch_load(path: Path, map_location="cpu"):
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
+
+
+def _keep_week_epoch(mu: float, sh: float, best_mu: float, best_sh: float, day_mu: float) -> bool:
+    """Keep a week epoch only when top-group excess stays at least the day tower's.
+
+    Among those epochs, the higher Sharpe wins. Equal Sharpe then prefers the
+    higher daily excess.
+    """
+    if not (np.isfinite(mu) and np.isfinite(sh) and np.isfinite(day_mu)):
+        return False
+    if mu + 1e-12 < float(day_mu):
+        return False
+    if not np.isfinite(best_sh):
+        return True
+    if sh > float(best_sh) + 1e-12:
+        return True
+    if abs(sh - float(best_sh)) <= 1e-12 and mu > float(best_mu) + 1e-12:
+        return True
+    return False
+
+
+def _top_group_mu_sharpe(codes, dates, pred, cfg, market) -> tuple[float, float]:
+    """Validation top decile, same 5 overlapping sleeves as the decile chart."""
+    from backtest_lib import assign_deciles, sharpe
+
+    n_deciles = int(getattr(cfg.backtest, "deciles", 10))
+    frame = pd.DataFrame({
+        "code": pd.Series(codes).astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(6),
+        "date": pd.to_datetime(dates),
+        "pred": np.asarray(pred, dtype=np.float64),
+    })
+    frame = assign_deciles(frame, n_deciles=n_deciles, score_col="pred")
+    top = frame.loc[frame["decile"] == n_deciles].copy()
+    if top.empty:
+        return float("nan"), float("nan")
+    top["bucket"] = 0
+    baskets = formation_baskets_group(top, "bucket", 0)
+    ret_wide, mkt, cal = market
+    horizon, n_sleeves = _horizon_sleeves(cfg)
+    daily = overlapping_sleeve_daily(
+        baskets, ret_wide, mkt, cal,
+        horizon=horizon, n_sleeves=n_sleeves, min_sleeves=n_sleeves,
+    )
+    if daily.empty:
+        return float("nan"), float("nan")
+    r = daily["daily_excess"].dropna()
+    if len(r) < 2:
+        return float("nan"), float("nan")
+    days = int(getattr(cfg.backtest, "trading_days_per_year", 252))
+    return float(r.mean()), float(sharpe(r, days))
+
+
+def _residual_epoch(model, loader, device, criterion, y_mean, y_std, y_lo, y_hi,
+                    optimiser=None, desc: str = "", collect: bool = False):
+    """Week tower trains. Day tower stays eval and out of the graph."""
+    train_mode = optimiser is not None
+    model.day.eval()
+    model.week.train(train_mode)
+    total_se = 0.0
+    correct = 0
+    seen = 0
+    preds: list[np.ndarray] = []
+    ys: list[np.ndarray] = []
+    it = tqdm(loader, desc=desc or ("train" if train_mode else "valid"),
+              leave=False, mininterval=2.0)
+    for batch in it:
+        day, week, yb = batch[:3]
+        day = day.to(device, non_blocking=True)
+        week = week.to(device, non_blocking=True)
+        n_here = day.size(0)
+        y_raw = yb.to(device, non_blocking=True).float().view(-1)
+        y_clip = torch.clamp(y_raw, y_lo, y_hi)
+        y_z = (y_clip - y_mean) / y_std
+        if train_mode:
+            optimiser.zero_grad(set_to_none=True)
+        pred_z = model(day, week).view(-1)
+        loss = criterion(pred_z, y_z)
+        if train_mode:
+            loss.backward()
+            optimiser.step()
+        pred_raw = pred_z.detach() * y_std + y_mean
+        total_se += torch.sum((pred_raw - y_clip) ** 2).item()
+        correct += ((pred_raw > 0) == (y_raw > 0)).sum().item()
+        seen += n_here
+        if collect:
+            preds.append(pred_raw.detach().cpu().numpy())
+            ys.append(y_raw.detach().cpu().numpy())
+    n = max(seen, 1)
+    mse = total_se / n
+    direction = correct / n
+    if collect:
+        return mse, direction, np.concatenate(preds), np.concatenate(ys)
+    return mse, direction
+
+
+def train_residual_seed(images, week_images, labels_df, cfg, paths, window_key,
+                        seed, day_ckpt: Path, out_path: Path,
+                        num_workers: int = 0, batch_size: int | None = None,
+                        pin_memory: bool = False) -> dict:
+    """Freeze the day tower. Fit the week residual on week-end rows only."""
+    if not day_ckpt.is_file():
+        raise FileNotFoundError(f"没有日塔权重 {day_ckpt}")
+    day_ck = _torch_load(day_ckpt, map_location="cpu")
+    day_mode = day_ck.get("fuse_mode")
+    day_inputs = [str(x) for x in day_ck.get("fuse_inputs", [])]
+    if day_mode not in (None, "day") or day_inputs not in ([], ["day"]):
+        raise RuntimeError(
+            f"{day_ckpt} 不是日塔权重（fuse_mode={day_mode!r} fuse_inputs={day_inputs}）"
+        )
+    for key in ("state_dict", "mean", "std", "y_mean", "y_std", "winsor_lo", "winsor_hi"):
+        if key not in day_ck:
+            raise RuntimeError(f"{day_ckpt} 缺少 {key}")
+
+    device = _pick_device()
+    window_key = normalize_window_key(window_key)
+    if "anchor" not in labels_df.columns:
+        raise RuntimeError("配对表没有 anchor。周塔只在 date==anchor 的行上更新。")
+    split = labels_df["split"].astype(str)
+    train_idx = _finite_mask(labels_df, np.flatnonzero(split == "train"))
+    valid_idx = _finite_mask(labels_df, np.flatnonzero(split == "valid"))
+    is_anchor = labels_df["date"].eq(labels_df["anchor"]).to_numpy()
+    train_anchor = train_idx[is_anchor[train_idx]]
+    if len(train_anchor) == 0 or len(valid_idx) == 0:
+        raise RuntimeError(
+            f"残差阶段没有样本 train_anchor={len(train_anchor)} valid={len(valid_idx)}"
+        )
+
+    y_mean = float(day_ck["y_mean"])
+    y_std = float(day_ck["y_std"]) if float(day_ck["y_std"]) > 0 else 1.0
+    y_lo = float(day_ck["winsor_lo"])
+    y_hi = float(day_ck["winsor_hi"])
+    day_mean = float(day_ck["mean"])
+    day_std = float(day_ck["std"]) if float(day_ck["std"]) > 0 else 1.0
+    y_all = labels_df[TARGET_COL].to_numpy(np.float32)
+    day_rows = labels_df["day_row"].to_numpy(np.int64)
+    week_rows = labels_df["week_row"].to_numpy(np.int64)
+    print(f"[seed {seed}] residual  device={device}  "
+          f"train_anchor={len(train_anchor)}  valid={len(valid_idx)}  "
+          f"day_ckpt={day_ckpt.name}", flush=True)
+    print(f"[seed {seed}] week tower uses day z-score  "
+          f"mean={y_mean:.6f} std={y_std:.6f}", flush=True)
+    print(f"[seed {seed}] fitting week pixel stats ...", flush=True)
+    w_mean, w_std = fit_pixel_stats_indexed(week_images, np.unique(week_rows[train_idx]))
+    print(f"[seed {seed}] week mean={w_mean:.4f} std={w_std:.4f}", flush=True)
+
+    def _ds(idx):
+        return PairedImageDataset(
+            images, week_images, idx, day_rows, week_rows, y_all[idx],
+            day_mean, day_std, w_mean, w_std, read_week=True)
+
+    if batch_size is None:
+        batch = 32 if window_key == "I60" else 64
+    else:
+        batch = int(batch_size)
+    pin = bool(pin_memory) and device.type == "cuda"
+    dl_train = DataLoader(_ds(train_anchor), batch_size=batch, shuffle=True,
+                          num_workers=num_workers, pin_memory=pin)
+    dl_valid = DataLoader(_ds(valid_idx), batch_size=batch, shuffle=False,
+                          num_workers=num_workers, pin_memory=pin)
+    valid_codes = labels_df["code"].to_numpy()[valid_idx]
+    valid_dates = labels_df["date"].to_numpy()[valid_idx]
+
+    torch.manual_seed(seed)
+    print(f"[seed {seed}] building residual model ...", flush=True)
+    model = build_model(window_key, cfg, kind="residual").to(device)
+    model.day.load_state_dict(day_ck["state_dict"])
+    for p in model.day.parameters():
+        p.requires_grad_(False)
+    model.day.eval()
+    optimiser = torch.optim.Adam(model.week.parameters(), lr=float(cfg.cnn.optimizer.lr))
+    criterion = nn.MSELoss()
+
+    print(f"[seed {seed}] validation top-group baseline from the frozen day tower ...", flush=True)
+    market = load_backtest_market(cfg, paths)
+    _, _, base_pred, base_y = _residual_epoch(
+        model, dl_valid, device, criterion, y_mean, y_std, y_lo, y_hi, None,
+        desc=f"seed{seed} day-base", collect=True)
+    day_mu, day_sh = _top_group_mu_sharpe(valid_codes, valid_dates, base_pred, cfg, market)
+    day_ic = _spearman(base_pred, base_y)
+    if not (np.isfinite(day_mu) and np.isfinite(day_sh)):
+        raise RuntimeError(
+            "验证集上算不出日塔最高一组的日均超额。检查行情文件和验证集日期。"
+        )
+    print(f"[seed {seed}] day baseline  top_mu={day_mu:.6f}  top_sharpe={day_sh:.4f}  "
+          f"ic={day_ic:.4f}", flush=True)
+
+    max_epochs = int(cfg.cnn.max_epochs)
+    best_mu = day_mu
+    best_sh = day_sh
+    best_ic = day_ic
+    best_epoch = 0
+    best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+    hist = []
+    t0 = time.time()
+    running_path = out_path.with_name(out_path.stem + ".running.pt")
+    print(f"[seed {seed}] fixed {max_epochs} epochs, week head starts at 0, "
+          f"keep a later epoch only if top-group excess >= day and Sharpe is higher",
+          flush=True)
+
+    def _payload(incomplete: bool) -> dict:
+        body = {
+            "state_dict": best_state,
+            "mean": day_mean, "std": day_std,
+            "week_mean": w_mean, "week_std": w_std,
+            "fuse_inputs": ["day", "week"],
+            "fuse_mode": "residual",
+            "day_ckpt": day_ckpt.name,
+            "y_mean": y_mean, "y_std": y_std,
+            "winsor_lo": y_lo, "winsor_hi": y_hi,
+            "seed": seed, "window": window_key,
+            "task": "regression", "target": TARGET_COL,
+            "history": hist, "best_epoch": best_epoch,
+            "best_top_mu": best_mu, "best_top_sharpe": best_sh,
+            "day_top_mu": day_mu, "day_top_sharpe": day_sh,
+            "best_val_ic": best_ic,
+            "select": "top_group_sharpe",
+            "elapsed_s": time.time() - t0,
+        }
+        if incomplete:
+            body["incomplete"] = True
+        else:
+            body["epochs"] = len(hist)
+        return body
+
+    for epoch in range(1, max_epochs + 1):
+        print(f"[seed {seed}] start residual epoch {epoch}/{max_epochs}", flush=True)
+        tr_mse, tr_dir = _residual_epoch(
+            model, dl_train, device, criterion, y_mean, y_std, y_lo, y_hi, optimiser,
+            desc=f"seed{seed} ep{epoch} week")
+        va_mse, va_dir, va_pred, va_y = _residual_epoch(
+            model, dl_valid, device, criterion, y_mean, y_std, y_lo, y_hi, None,
+            desc=f"seed{seed} ep{epoch} valid", collect=True)
+        va_ic = _spearman(va_pred, va_y)
+        top_mu, top_sh = _top_group_mu_sharpe(valid_codes, valid_dates, va_pred, cfg, market)
+        hist.append({
+            "epoch": epoch,
+            "train_mse": tr_mse, "train_dir": tr_dir,
+            "valid_mse": va_mse, "valid_dir": va_dir, "valid_ic": va_ic,
+            "top_mu": top_mu, "top_sharpe": top_sh,
+        })
+        improved = _keep_week_epoch(top_mu, top_sh, best_mu, best_sh, day_mu)
+        if improved:
+            best_mu = top_mu
+            best_sh = top_sh
+            best_ic = va_ic
+            best_epoch = epoch
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        mark = "  best" if improved else ""
+        print(f"[seed {seed}] ep {epoch:02d}/{max_epochs}  "
+              f"train mse={tr_mse:.6f} dir={tr_dir:.3f}  "
+              f"valid mse={va_mse:.6f} dir={va_dir:.3f} ic={va_ic:.4f}  "
+              f"top_mu={top_mu:.6f} top_sharpe={top_sh:.4f}  "
+              f"best_epoch={best_epoch}{mark}", flush=True)
+        _save_ckpt(running_path, _payload(True))
+        print(f"[seed {seed}] wrote {running_path.name} after epoch {epoch}", flush=True)
+
+    if best_epoch == 0:
+        print(f"[seed {seed}] 周塔没有超过日塔，留下全 0 的周线性层。预测等于日塔。", flush=True)
+    _save_ckpt(out_path, _payload(False))
+    if running_path.exists():
+        running_path.unlink()
+    elapsed = time.time() - t0
+    print(f"[seed {seed}] saved {out_path}  best_epoch={best_epoch}/{max_epochs}  "
+          f"top_mu={best_mu:.6f} top_sharpe={best_sh:.4f}  "
+          f"day_mu={day_mu:.6f} day_sharpe={day_sh:.4f}  {elapsed:.1f}s",
+          flush=True)
+    return {
+        "seed": seed, "best_epoch": best_epoch,
+        "best_top_mu": best_mu, "best_top_sharpe": best_sh,
+        "day_top_mu": day_mu, "day_top_sharpe": day_sh,
+        "best_val_ic": best_ic, "epochs": len(hist),
+        "elapsed_s": elapsed, "path": str(out_path), "day_ckpt": str(day_ckpt),
+    }
+
+
 def train_window(cfg, paths, window_key: str = WINDOW_KEY, n_seeds: int = 5,
                  num_workers: int = 0, skip_existing: bool = True,
                  batch_size: int | None = None,
@@ -512,22 +804,46 @@ def train_window(cfg, paths, window_key: str = WINDOW_KEY, n_seeds: int = 5,
     task = str(getattr(cfg.cnn, "task", ""))
     if task != "regression":
         raise RuntimeError(f"cnn.task 应为 regression，实际是 {task!r}")
+    from pair_lib import fuse_mode
+    mode = fuse_mode(cfg)
     model_dir = resolve_model_dir(paths, cfg, window_key)
     print("models =", model_dir)
-    print(f"epochs = {int(cfg.cnn.max_epochs)}  （固定轮数，不早停，按验证集 Spearman IC 留最好一轮）")
+    print("mode =", mode)
+    if mode == "residual":
+        print(f"epochs = {int(cfg.cnn.max_epochs)}  （先训日塔，按 Spearman 留；"
+              f"再训周塔残差，验证集最高一组的日均超额不低于日塔时，留夏普更高的一轮）")
+    else:
+        print(f"epochs = {int(cfg.cnn.max_epochs)}  （固定轮数，不早停，按验证集 Spearman IC 留最好一轮）")
     images, week_images, labels = load_paired_frame(cfg, paths, window_key)
 
     results = []
     for k in range(n_seeds):
         seed = int(cfg.project.random_seed) + k
         ckpt = model_dir / f"seed_{k}.pt"
+        if mode == "residual":
+            day_ckpt = model_dir / f"seed_{k}_day.pt"
+            if skip_existing and day_ckpt.exists():
+                print(f"skip day seed {k} (exists {day_ckpt})")
+            else:
+                results.append(train_one_seed(
+                    images, labels, cfg, window_key, seed, day_ckpt,
+                    num_workers=num_workers, batch_size=batch_size,
+                    pin_memory=pin_memory, week_images=week_images, kind="day"))
+            if skip_existing and ckpt.exists():
+                print(f"skip residual seed {k} (exists {ckpt})")
+                continue
+            results.append(train_residual_seed(
+                images, week_images, labels, cfg, paths, window_key, seed,
+                day_ckpt, ckpt, num_workers=num_workers, batch_size=batch_size,
+                pin_memory=pin_memory))
+            continue
         if skip_existing and ckpt.exists():
             print(f"skip seed {k} (exists {ckpt})")
             continue
         results.append(train_one_seed(
             images, labels, cfg, window_key, seed, ckpt,
             num_workers=num_workers, batch_size=batch_size,
-            pin_memory=pin_memory, week_images=week_images))
+            pin_memory=pin_memory, week_images=week_images, kind=mode))
     log_dir = Path(paths["logs"])
     log_dir.mkdir(parents=True, exist_ok=True)
     with (log_dir / f"train_{window_key}_summary.json").open("w") as f:
@@ -564,13 +880,14 @@ def _infer_pred(model, loader, device, y_mean: float, y_std: float) -> np.ndarra
 
 def predict_window(cfg, paths, window_key: str = WINDOW_KEY,
                    num_workers: int = 0) -> pd.DataFrame:
-    from pair_lib import fuse_inputs
+    from pair_lib import fuse_inputs, fuse_mode
 
     window_key = normalize_window_key(window_key)
     model_dir = resolve_model_dir(paths, cfg, window_key)
     results_dir = resolve_results_dir(paths, cfg)
     images, week_images, labels = load_paired_frame(cfg, paths, window_key)
     inputs = fuse_inputs(cfg)
+    mode = fuse_mode(cfg)
     test_idx = np.flatnonzero(labels["split"].astype(str) == "test")
     if len(test_idx) == 0:
         raise RuntimeError("没有 test 样本")
@@ -579,7 +896,7 @@ def predict_window(cfg, paths, window_key: str = WINDOW_KEY,
     if not finite.all():
         test_idx = test_idx[finite]
     test_labels = labels.iloc[test_idx].reset_index(drop=True)
-    print(f"{window_key} test images={len(test_idx)}  inputs={inputs}")
+    print(f"{window_key} test images={len(test_idx)}  inputs={inputs}  mode={mode}")
 
     ckpts = _seed_ckpts(model_dir)
     if not ckpts:
@@ -598,11 +915,15 @@ def predict_window(cfg, paths, window_key: str = WINDOW_KEY,
         if "y_mean" not in ck or "y_std" not in ck:
             raise RuntimeError(f"{ck_path} 缺少 y_mean/y_std，不是这一版回归权重")
         ck_inputs = [str(x) for x in ck.get("fuse_inputs", [])]
-        if ck_inputs != inputs:
+        ck_mode = ck.get("fuse_mode")
+        if not ck_mode:
+            ck_mode = "day" if ck_inputs == ["day"] else "concat"
+        if ck_mode != mode or ck_inputs != inputs:
             raise RuntimeError(
-                f"{ck_path} 的 fuse_inputs={ck_inputs}，config 是 {inputs}。不要混用对照权重。"
+                f"{ck_path} 的 fuse_mode={ck_mode} fuse_inputs={ck_inputs}，"
+                f"config 是 mode={mode} inputs={inputs}。不要混用对照权重。"
             )
-        model = build_model(window_key, cfg).to(device)
+        model = build_model(window_key, cfg, kind=ck_mode).to(device)
         model.load_state_dict(ck["state_dict"])
         ds = PairedImageDataset(
             images, week_images, test_idx,
@@ -610,7 +931,7 @@ def predict_window(cfg, paths, window_key: str = WINDOW_KEY,
             labels["week_row"].to_numpy(np.int64),
             y[test_idx], ck["mean"], ck["std"],
             ck.get("week_mean", 0.0), ck.get("week_std", 1.0),
-            read_week=("week" in inputs),
+            read_week=(ck_mode != "day"),
         )
         dl = DataLoader(ds, batch_size=batch, shuffle=False,
                         num_workers=num_workers, pin_memory=(device.type == "cuda"))
