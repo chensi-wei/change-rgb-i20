@@ -143,3 +143,8 @@ data/  models/  results/  figures/  logs/
 1 个种子，2020–2025，5 个组合，扣费前。组别 0 是预测超额最高的 10%。
 
 ![I20 gray body decile](I20_gray_body_decile.png)
+
+## I20 十分位
+
+<img width="2880" height="1024" alt="I60_decile" src="https://github.com/user-attachments/assets/a294f765-29cf-4465-bb19-47422ffe8198" />
+
