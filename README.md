@@ -144,7 +144,7 @@ data/  models/  results/  figures/  logs/
 
 ![I20 gray body decile](I20_gray_body_decile.png)
 
-## I20 十分位
+## I60 十分位
 
 <img width="2880" height="1024" alt="I60_decile" src="https://github.com/user-attachments/assets/a294f765-29cf-4465-bb19-47422ffe8198" />
 
