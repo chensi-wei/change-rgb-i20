@@ -11,7 +11,7 @@ paths:
   # 每个已走完的周一张图。周一到周四复用最近的这一张。
   week_images_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_fuse_week"
   # 权重、配对表、预测。不要写回 gray_body、gray_week，也不要写进拼接那一版的 k_pictures_gray_fuse。
-  output_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_fuse_residual"
+  output_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_fuse_day20"
   pingquan_csv: "/storage/server/227server/marketdata/pingquan/daily/pingquan.csv"
   figures: figures
   logs: logs
@@ -73,8 +73,13 @@ fuse:
   # inputs 改成 [day] 时只训日塔，并且要换一个 output_remote。
   mode: residual
   inputs: [day, week]
-  # 20 根周 K 大约 100 个交易日。切分间隔按这个来，避免同一根周 K 出现在训练和验证里。
+  # 日塔只看 20 根日 K，间隔 20 个交易日。样本停在 day_span_end，含用来挑轮数的验证期。
+  day_embargo_days: 20
+  day_span_end: "2017-12-31"
+  # 周塔从日塔验证结束再隔 100 个交易日开始。周塔自己的训练、验证、测试也各隔 100。
+  # 这段只到 2019 年底。若仍用 0.7，100 日间隔会把周塔验证挤成大约一个月。
   embargo_days: 100
+  week_train_valid_split: 0.55
 
 backtest:
   rebalance_freq: "D"

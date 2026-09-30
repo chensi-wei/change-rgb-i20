@@ -23,7 +23,7 @@ from cnn import build_model
 
 REMOTE = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body")
 WEEK_REMOTE = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_fuse_week")
-OUTPUT_REMOTE = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_fuse_residual")
+OUTPUT_REMOTE = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_fuse_day20")
 WINDOW_KEY = "I20"
 TARGET_COL = "future_ret"
 
@@ -821,19 +821,25 @@ def train_window(cfg, paths, window_key: str = WINDOW_KEY, n_seeds: int = 5,
         seed = int(cfg.project.random_seed) + k
         ckpt = model_dir / f"seed_{k}.pt"
         if mode == "residual":
+            if "day_split" not in labels.columns or "week_split" not in labels.columns:
+                raise RuntimeError("残差这版需要 day_split 和 week_split。日塔 20 天间隔，周塔 100 天间隔。")
+            day_labels = labels.copy()
+            day_labels["split"] = labels["day_split"].astype(str)
+            week_labels = labels.copy()
+            week_labels["split"] = labels["week_split"].astype(str)
             day_ckpt = model_dir / f"seed_{k}_day.pt"
             if skip_existing and day_ckpt.exists():
                 print(f"skip day seed {k} (exists {day_ckpt})")
             else:
                 results.append(train_one_seed(
-                    images, labels, cfg, window_key, seed, day_ckpt,
+                    images, day_labels, cfg, window_key, seed, day_ckpt,
                     num_workers=num_workers, batch_size=batch_size,
                     pin_memory=pin_memory, week_images=week_images, kind="day"))
             if skip_existing and ckpt.exists():
                 print(f"skip residual seed {k} (exists {ckpt})")
                 continue
             results.append(train_residual_seed(
-                images, week_images, labels, cfg, paths, window_key, seed,
+                images, week_images, week_labels, cfg, paths, window_key, seed,
                 day_ckpt, ckpt, num_workers=num_workers, batch_size=batch_size,
                 pin_memory=pin_memory))
             continue
