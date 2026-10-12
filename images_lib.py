@@ -1,4 +1,4 @@
-"""Daily grayscale images for I20 or I60. Filters and labels match no_rolling."""
+"""Daily grayscale images without MACD. Filters and labels match no_rolling."""
 from __future__ import annotations
 
 import json
@@ -10,10 +10,10 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from draw_gray import macd_window, render_gray
+from draw_gray import render_gray
 
 _WP: dict = {}
-REMOTE_IMAGES = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body")
+REMOTE_IMAGES = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_no_macd_20261012_141417")
 
 
 def daily_rebalance_dates(cal: pd.DatetimeIndex, start: str, end: str
@@ -81,7 +81,6 @@ def _gen_one_stock(payload: tuple):
     has_open_cap = p["has_open_cap"]
     require_volume = p["require_volume"]
     draw_kw = p["draw_kw"]
-    macd_warmup = int(p.get("macd_warmup", 105))
 
     (code, dates, o_all, h_all, l_all, c_all, ret_all, vol_all,
      lu, ld, st, olu, market_pos, reb_ix, mkt_all) = payload
@@ -132,14 +131,7 @@ def _gen_one_stock(payload: tuple):
             o, h, l, c_path, v = _window_prices(
                 o_all, h_all, l_all, c_all, ret_all, vol_all,
                 start_ix, end_ix, window)
-            dif, dea, hist = macd_window(
-                ret_all, start_ix, end_ix,
-                fast=int(draw_kw["macd_fast"]),
-                slow=int(draw_kw["macd_slow"]),
-                signal=int(draw_kw["macd_signal"]),
-                warmup=macd_warmup,
-            )
-            imgs.append(render_gray(o, h, l, c_path, v, dif, dea, hist, **draw_kw))
+            imgs.append(render_gray(o, h, l, c_path, v, **draw_kw))
 
     if not imgs:
         return None, meta
@@ -409,9 +401,6 @@ def _image_cfg(cfg, window_key="I20") -> dict:
             price_rows=price_rows,
             volume_rows=volume_rows,
             macd_rows=macd_rows,
-            macd_fast=int(im.macd_fast),
-            macd_slow=int(im.macd_slow),
-            macd_signal=int(im.macd_signal),
         ),
     }
 
@@ -544,7 +533,6 @@ def generate_images(
         count_only=count_only, has_limit=has_limit, has_st=has_st,
         has_open_cap=has_open_cap, require_volume=require_volume,
         draw_kw=spec["draw_kw"],
-        macd_warmup=int(getattr(cfg.image, "macd_warmup", 105)),
     )
 
     all_meta: list[tuple] = []
@@ -633,6 +621,7 @@ def generate_images(
         "price_rows": int(cfg.image.price_rows),
         "volume_rows": int(cfg.image.volume_rows),
         "macd_rows": int(cfg.image.macd_rows),
+        "macd_enabled": False,
         "px_per_day": int(cfg.image.px_per_day),
     }, indent=2), encoding="utf-8")
     pointer = Path(paths["images"]) / f"{window_key}_LOCATION.txt"
@@ -692,9 +681,9 @@ def verify_images(cfg, paths: dict, window_key: str = "I20",
     sample = np.asarray(images[rng.choice(len(images), n_sample, replace=False)])[:, 0]
     price = sample[:, :price_rows, :]
     vol = sample[:, price_rows:price_rows + volume_rows, :]
-    macd = sample[:, price_rows + volume_rows:, :]
+    blank = sample[:, price_rows + volume_rows:, :]
 
-    from draw_gray import DEA_GRAY, DIF_GRAY, DOWN, HIST_NEG, HIST_POS, UP, VOL_DOWN, VOL_UP, WICK
+    from draw_gray import DOWN, UP, VOL_DOWN, VOL_UP, WICK
     price_known = np.isin(price, [0, int(UP), int(DOWN), int(WICK)])
     verdict(bool(price_known.all()), "price panel is background / body / wick")
     verdict(bool((price == int(UP)).any()), "price has up body")
@@ -713,15 +702,7 @@ def verify_images(cfg, paths: dict, window_key: str = "I20",
             "volume gray is up or down, not the body gray")
     verdict(bool((vol_mid != 0).any()), "volume middle column is drawn")
 
-    macd_left = macd[:, :, 0::px]
-    macd_mid = macd[:, :, 1::px]
-    macd_right = macd[:, :, 2::px]
-    verdict(bool(np.isin(macd_left, [0, int(DIF_GRAY)]).all()), "DIF only on left columns")
-    verdict(bool(np.isin(macd_right, [0, int(DEA_GRAY)]).all()), "DEA only on right columns")
-    verdict(bool(np.isin(macd_mid, [0, int(HIST_POS), int(HIST_NEG)]).all()),
-            "histogram only on middle column")
-    verdict(bool((macd_left == int(DIF_GRAY)).any() and (macd_right == int(DEA_GRAY)).any()),
-            "MACD panel has DIF and DEA")
+    verdict(bool((blank == 0).all()), "former MACD panel is blank")
 
     train = labels[labels["split"] == "train"]
     valid = labels[labels["split"] == "valid"]

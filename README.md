@@ -2,14 +2,14 @@
 
 用日频灰度蜡烛图预测未来 5 个交易日相对 688 平权的超额收益，再按预测超额做每日选股和 5 个组合的回测。
 
-这一支是灰度实体版。`main` 仍是上一版 RGB 回归，读的是已经生成好的 3 通道图。这一支要重新画图：三列实心实体保留，涨跌、影线、成交量和 MACD 用不同灰度分开，MACD 用窗口之前的收盘预热。
+这一支是灰度实体版。`main` 仍是上一版 RGB 回归，读的是已经生成好的 3 通道图。这一支要重新画图：三列实心实体保留，涨跌、影线和成交量用不同灰度分开，不再计算或绘制 MACD。
 
 ## 图像
 
 图像、权重和预测都在：
 
 ```text
-/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body/{I20|I60}/
+/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_no_macd_20261012_141417/{I20|I60}/
 ```
 
 不要覆盖 `k_pictures_rgb_I20` 和 `k_pictures_gray_reg`。
@@ -28,11 +28,13 @@
 
 - 上面 70 行是价格。收盘高于开盘的实体为 255，收盘低于或等于开盘的实体为 96。开盘到收盘的实体涂满这 3 列。最低到最高的影线只画在中间列，灰度为 176。没有均线。
 - 中间 15 行是成交量，只画中间列。阳线对应 220，阴线对应 48，和实体的灰度不同。
-- 下面 15 行是 MACD。EMA 12/26，信号线 9。计算时带上窗口之前最多 105 根收盘做预热，只把窗口内这一段画出来。DIF 为 200，只落在每根 K 线的左列。DEA 为 140，只落在右列。柱画在中间列，大于等于 0 为 255，小于 0 为 64。顶点不连成横穿其他列的线，避免盖住柱。DIF、DEA 和柱一起按窗口内最大绝对值缩放到这 15 行里。
+- 下面 15 行保留为黑色空白，不包含 MACD 数据。图片高度和价格、成交量区域的位置不变。
 
-价格先把窗口第一根收盘当作锚，在收益率路径上重建 OHLC，再用窗口内 OHLC 的最小最大值归一化。MACD 用同一条收益率路径，锚点收盘为 1。样本是每个交易日一张图。
+价格先把窗口第一根收盘当作锚，在收益率路径上重建 OHLC，再用窗口内 OHLC 的最小最大值归一化。样本是每个交易日一张图。
 
 生成在 `03_generate_images.ipynb`。`WINDOW_KEY` 用 `20` 或 `60`。调试时 `MAX_CODES = 20`，全量改为 `None`。
+
+已有图片不会自动去掉 MACD，需要重新生成。对无 MACD 图片训练时，应使用新的权重和预测，避免 `SKIP_EXISTING=True` 跳过训练并复用旧权重。生成的 `image_spec.json` 会记录 `macd_enabled: false`。
 
 ## 标签与样本过滤
 
@@ -94,7 +96,7 @@
 权重目录：
 
 ```text
-/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body/models/{I20|I60}/
+/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_no_macd_20261012_141417/models/{I20|I60}/
 ```
 
 ## 预测与回测
@@ -102,7 +104,7 @@
 `predict_window` 只对 `test` 做推理，写出
 
 ```text
-/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body/results/pred_{I20|I60}.parquet
+/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_no_macd_20261012_141417/results/pred_{I20|I60}.parquet
 ```
 
 `pred` 是预测的 5 日超额，可以是负数。它和二分类版本的 `prob` 不是同一个量。`prob` 是“超额大于 0”的概率，范围在 0 到 1。两边选股时都是当天分数从高到低取前 10%。
@@ -121,8 +123,8 @@
 
 把本仓库的这一支放到服务器上单独一个目录。用该目录下的 Jupyter 内核从第一格按顺序跑。
 
-1. `03_generate_images.ipynb`：先 `MAX_CODES = 20` 看校验是否通过，再改成 `None` 生成全量。图写到 `k_pictures_gray_body`。
-2. `04_train_predict.ipynb`：确认第一格打印 `task = regression`，并且 `output` 指向 `k_pictures_gray_body`。训练后再跑预测。日志里应出现 `OOS mse=... dir_acc=... ic=...`，以及 `wrote .../pred_I20.parquet`。
+1. `03_generate_images.ipynb`：先 `MAX_CODES = 20` 看校验是否通过，再改成 `None` 生成全量。图写到 `k_pictures_gray_body_no_macd_20261012_141417`。
+2. `04_train_predict.ipynb`：确认第一格打印 `task = regression`，并且 `output` 指向 `k_pictures_gray_body_no_macd_20261012_141417`。训练后再跑预测。日志里应出现 `OOS mse=... dir_acc=... ic=...`，以及 `wrote .../pred_I20.parquet`。
 3. `05_plot_top10.ipynb`：Top 10%、十分位、随机分组、扣费对照。
 
 `WINDOW_KEY` 用 `"I20"` 或 `"I60"`，必须和已经生成的图一致。不要和正在读同一份 `images.npy` 的另一个训练同时跑，两边会抢网络盘。
@@ -140,11 +142,28 @@ data/  models/  results/  figures/  logs/
 
 ## I20 十分位
 
+以下 I20 / I60 结果图来自去掉 MACD 之前的版本，不代表当前无 MACD 图片的结果。
+
 1 个种子，2020–2025，5 个组合，扣费前。组别 0 是预测超额最高的 10%。
 
-![I20 gray body decile](I20_gray_body_decile.png)
+[历史 I20 结果图](https://github.com/chensi-wei/change-rgb-i20/blob/5689ba2dcd849e2f163e7a05698c555844cee04a/I20_gray_body_decile.png)
 
 ## I60 十分位
 
 <img width="2880" height="1024" alt="I60_decile" src="https://github.com/user-attachments/assets/a294f765-29cf-4465-bb19-47422ffe8198" />
 
+
+## 本地修改、上传与版本控制
+
+这一版的远程保存根目录为 `/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_no_macd_20261012_141417`。
+本地备用图像在 `data/images_no_macd_20261012_141417`；图表、日志、权重和预测也使用相同版本后缀。
+输入行情和 `pingquan.csv` 的路径保持原样。
+
+以后修改版本时，先更换 `config.yaml` 中全部输出目录，再同步 `images_lib.py`、`train_lib.py` 的默认目录和 Notebook 说明。
+同一版本内的生成、训练、预测和回测必须读取同一套目录；不同版本使用不同时间戳。
+
+只在本地修改项目，由用户将文件上传到运行平台。上传后重启 Notebook 内核，从第一格初始化，核对 `ROOT`、`images`、`remote` 和 `output` 后再运行。
+修改 `config.yaml` 后，生成单元格会重新读取配置，避免继续使用内存中的旧保存路径。
+
+重大改动完成后，在 `chensi-wei/change-rgb-i20` 的独立分支提交并推送代码、配置和说明；提交前检查差异并完成适当验证。
+Git 不保存生成图像、模型、预测、日志、密钥或 Notebook 运行输出。当前版本分支为 `gray-body-no-macd`。

@@ -19,8 +19,8 @@ from tqdm import tqdm
 
 from cnn import build_model
 
-REMOTE = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body")
-OUTPUT_REMOTE = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body")
+REMOTE = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_no_macd_20261012_141417")
+OUTPUT_REMOTE = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_no_macd_20261012_141417")
 WINDOW_KEY = "I20"
 TARGET_COL = "future_ret"
 

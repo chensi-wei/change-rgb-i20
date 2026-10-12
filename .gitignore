@@ -9,3 +9,10 @@ logs/
 *.npy
 *.pt
 *.parquet
+
+.ipynb_checkpoints/
+.env.*
+models_*/
+results_*/
+figures_*/
+logs_*/
