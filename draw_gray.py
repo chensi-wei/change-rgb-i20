@@ -1,9 +1,8 @@
 """Grayscale candlestick renderer. Width is n_bars * 3.
 
 Body fills all 3 columns between open and close. Wick is the middle column
-from low to high. Volume is the middle column. DIF is drawn on the left
-column, DEA on the right column, and the MACD histogram on the middle column.
-Background is black. Each role uses its own gray level.
+from low to high. Volume is the middle column. The former MACD panel stays
+black so image dimensions and the price/volume layout remain unchanged.
 """
 from __future__ import annotations
 
@@ -138,20 +137,14 @@ def _draw_polyline(img: np.ndarray, row: np.ndarray, col: np.ndarray,
 def render_gray(
     o: np.ndarray, h: np.ndarray, l: np.ndarray, c: np.ndarray,
     vol: np.ndarray,
-    dif: np.ndarray | None = None,
-    dea: np.ndarray | None = None,
-    hist: np.ndarray | None = None,
     *,
     image_height: int = IMAGE_HEIGHT,
     px_per_day: int = PX_PER_DAY,
     price_rows: int = PRICE_ROWS,
     volume_rows: int = VOLUME_ROWS,
     macd_rows: int = MACD_ROWS,
-    macd_fast: int = 12,
-    macd_slow: int = 26,
-    macd_signal: int = 9,
 ) -> np.ndarray:
-    """Return uint8 grayscale image, shape (H, W)."""
+    """Return uint8 grayscale image with a blank former MACD panel, shape (H, W)."""
     if price_rows + volume_rows + macd_rows != image_height:
         raise ValueError(
             f"panel rows {price_rows}+{volume_rows}+{macd_rows} != {image_height}")
@@ -211,26 +204,4 @@ def render_gray(
                 bot = np.full(int(use.sum()), price_rows + volume_rows - 1, dtype=np.int64)
                 _paint_span(img, top, bot, col_mid[use], vol_gray[use])
 
-    if macd_rows > 0 and np.all(np.isfinite(c)):
-        if dif is None or dea is None or hist is None:
-            dif, dea, hist = macd_lines(c, macd_fast, macd_slow, macd_signal)
-        dif = np.asarray(dif, dtype=np.float64)
-        dea = np.asarray(dea, dtype=np.float64)
-        hist = np.asarray(hist, dtype=np.float64)
-        scale = max(float(np.nanmax(np.abs(dif))), float(np.nanmax(np.abs(dea))),
-                    float(np.nanmax(np.abs(hist))), 1e-12)
-        dif = dif / scale
-        dea = dea / scale
-        hist = hist / scale
-        row0 = price_rows + volume_rows
-        dif_r = row0 + _signed_to_row(dif, macd_rows)
-        dea_r = row0 + _signed_to_row(dea, macd_rows)
-        hist_r = row0 + _signed_to_row(hist, macd_rows)
-        zero_r = int(row0 + _signed_to_row(np.array([0.0]), macd_rows)[0])
-        _draw_points(img, dif_r, col_open, int(DIF_GRAY), row0, image_height)
-        _draw_points(img, dea_r, col_close, int(DEA_GRAY), row0, image_height)
-        hist_gray = np.where(hist >= 0, HIST_POS, HIST_NEG).astype(np.uint8)
-        top = np.minimum(hist_r, zero_r)
-        bot = np.maximum(hist_r, zero_r)
-        _paint_span(img, top, bot, col_mid, hist_gray)
     return img
