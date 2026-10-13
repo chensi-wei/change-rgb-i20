@@ -36,8 +36,12 @@ image:
   px_per_day: 3
   price_rows: 70
   volume_rows: 15
-  macd_rows: 15  # 保留原区域和图片尺寸，但不计算或绘制 MACD。
+  macd_rows: 15
   return_horizon_days: 5
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+  macd_warmup: 105
 
 cnn:
   task: regression
