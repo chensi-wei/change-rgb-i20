@@ -148,9 +148,7 @@ data/  models/  results/  figures/  logs/
 
 [历史 I20 结果图](https://github.com/chensi-wei/change-rgb-i20/blob/5689ba2dcd849e2f163e7a05698c555844cee04a/I20_gray_body_decile.png)
 
-## I60 十分位
 
-<img width="2880" height="1024" alt="I60_decile" src="https://github.com/user-attachments/assets/a294f765-29cf-4465-bb19-47422ffe8198" />
 
 
 ## 本地修改、上传与版本控制
