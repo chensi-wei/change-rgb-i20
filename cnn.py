@@ -23,11 +23,31 @@ class ConvBlock(nn.Module):
         return self.pool(x)
 
 
+class TemporalAttention(nn.Module):
+    """Lightweight weights over historical columns; identity at initialization."""
+
+    def __init__(self, channels: int):
+        super().__init__()
+        self.score = nn.Conv1d(channels, 1, kernel_size=3, padding=1)
+        nn.init.zeros_(self.score.weight)
+        nn.init.zeros_(self.score.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Every column is inside the already observed image window. This layer
+        # receives neither future observations nor training/evaluation targets.
+        scores = self.score(x.mean(dim=2))
+        relative_weights = torch.softmax(scores, dim=-1) * x.shape[-1]
+        # Retain half of the original features to avoid erasing other periods.
+        weights = 0.5 + 0.5 * relative_weights
+        return x * weights.unsqueeze(2)
+
+
 class CNNPriceImage(nn.Module):
     def __init__(self, filters: list[int], n_out: int = 1, in_ch: int = 1,
                  dropout_fc: float = 0.5,
                  conv_kernel=(5, 3), conv_stride=(3, 1), conv_padding=(12, 1),
-                 pool_kernel=(2, 1), leaky_slope: float = 0.01):
+                 pool_kernel=(2, 1), leaky_slope: float = 0.01,
+                 temporal_attention: bool = False):
         super().__init__()
         layers: list[nn.Module] = []
         in_ch = int(in_ch)
@@ -39,12 +59,14 @@ class CNNPriceImage(nn.Module):
             ))
             in_ch = out_ch
         self.features = nn.Sequential(*layers)
+        self.attention = TemporalAttention(in_ch) if temporal_attention else nn.Identity()
         self.flatten = nn.Flatten()
         self.dropout = nn.Dropout(p=dropout_fc)
         self.head = nn.LazyLinear(n_out)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.features(x)
+        x = self.attention(x)
         x = self.flatten(x)
         x = self.dropout(x)
         return self.head(x)
@@ -88,6 +110,7 @@ def build_model(window_key: str, cfg) -> CNNPriceImage:
         conv_padding=tuple(cnn_cfg.conv_padding),
         pool_kernel=tuple(cnn_cfg.pool_kernel),
         leaky_slope=float(cnn_cfg.leaky_relu_slope),
+        temporal_attention=bool(getattr(cnn_cfg, "temporal_attention", False)),
     )
     with torch.no_grad():
         _ = model(torch.zeros(1, in_ch, height, width))

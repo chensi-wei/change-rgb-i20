@@ -4,15 +4,15 @@ project:
 
 paths:
   processed: "/home/shixi05/ChenSiwei/0914/data/processed"
-  images: data/images
-  # 这一版重新生成的灰度图。不要覆盖 k_pictures_rgb_I20 和 k_pictures_gray_reg。
-  images_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body"
-  output_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body"
+  images: data/images/i20_attention_v1
+  # 新实验图像和定位文件单独保存，避免读取或覆盖旧实验。
+  images_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_attention_v1"
+  output_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_attention_v1"
   pingquan_csv: "/storage/server/227server/marketdata/pingquan/daily/pingquan.csv"
-  figures: figures
-  logs: logs
-  models: models
-  results: results
+  figures: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_attention_v1/figures"
+  logs: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_attention_v1/logs"
+  models: models/i20_attention_v1
+  results: results/i20_attention_v1
 
 data:
   train_start: "2015-01-01"
@@ -47,6 +47,7 @@ cnn:
   task: regression
   target: future_ret
   in_channels: 1
+  temporal_attention: true
   winsor_quantiles: [0.01, 0.99]
   select: spearman
   conv_kernel:  [5, 3]
@@ -59,7 +60,7 @@ cnn:
   filters:
     I20: [64, 128, 256]
     I60: [64, 128, 256, 512]
-  ensemble_seeds: 5
+  ensemble_seeds: 3
   optimizer: {name: adam, lr: 1.0e-5}
   batch_size: 128
   max_epochs: 10

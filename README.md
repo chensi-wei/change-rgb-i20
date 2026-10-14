@@ -2,17 +2,19 @@
 
 用日频灰度蜡烛图预测未来 5 个交易日相对 688 平权的超额收益，再按预测超额做每日选股和 5 个组合的回测。
 
-这一支是灰度实体版。`main` 仍是上一版 RGB 回归，读的是已经生成好的 3 通道图。这一支要重新画图：三列实心实体保留，涨跌、影线和成交量用不同灰度分开
+当前工作区是含 MACD 的灰度实体回归版，并在原 CNN 后加入轻量时间注意力。I20 本次实验使用 3 个随机种子等权平均。图像生成、样本筛选、MSE 损失、训练轮数、验证集 Spearman 选模与五批资金回测沿用原框架。
 
 ## 图像
 
-图像、权重和预测都在：
+本次实验的服务器根目录是：
 
 ```text
-/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body/{I20|I60}/
+/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_attention_v1/
 ```
 
-不要覆盖 `k_pictures_rgb_I20` 和 `k_pictures_gray_reg`。
+图像在根目录下的 `I20/`（或 `I60/`），权重在 `models/{I20|I60}/`，预测和回测结果在 `results/`，日志和图表在 `logs/`、`figures/`。不要覆盖原来的 `k_pictures_gray_body`、`k_pictures_rgb_I20` 和 `k_pictures_gray_reg`。
+
+本地图像备用目录与定位文件在 `data/images/i20_attention_v1/`。服务器权重和预测目录不可写时，原有回退逻辑分别使用本地 `models/i20_attention_v1/` 和 `results/i20_attention_v1/`。实际路径以笔记本输出为准。
 
 每个窗口目录里有：
 
@@ -32,7 +34,7 @@
 
 价格先把窗口第一根收盘当作锚，在收益率路径上重建 OHLC，再用窗口内 OHLC 的最小最大值归一化。MACD 用同一条收益率路径，锚点收盘为 1。样本是每个交易日一张图。
 
-生成在 `03_generate_images.ipynb`。`WINDOW_KEY` 用 `20` 或 `60`。调试时 `MAX_CODES = 20`，全量改为 `None`。
+生成在 `03_generate_images.ipynb`。`WINDOW_KEY` 用 `20` 或 `60`。当前默认 `MAX_CODES = None` 生成全量；调试时可改成 `20`，调试完成后须重新生成全量再训练。
 
 ## 标签与样本过滤
 
@@ -77,7 +79,9 @@
 | 池化核 / 步长 | `(2, 1)` / `(2, 1)` | 相同 |
 | 通道 | 64, 128, 256 | 64, 128, 256, 512 |
 
-卷积之后展平，Dropout 0.5，线性层输出 1 个数。权重用 Xavier uniform 初始化。
+卷积之后先经过时间注意力，再展平，Dropout 0.5，线性层输出 1 个数。原卷积和线性层权重用 Xavier uniform 初始化。
+
+时间注意力沿特征图高度取均值，再用核宽为 3 的一维卷积为历史窗口各列打分。softmax 权重乘以列数后，与等权按 1:1 混合，作用于原特征图。打分层权重和偏置初始化为零，因此初始各列等权。I20 新增 769 个参数，不引入新输入特征或未来标签；关闭配置中的 `cnn.temporal_attention` 可回到原结构。不同结构的权重不能混用。
 
 损失用的目标先按训练集 1% 和 99% 分位截尾，再用截尾后的均值和标准差做标准化。预测时乘回这个标准差并加回均值。日志里的 mse 是截尾后超额尺度上的均方误差。
 
@@ -89,12 +93,12 @@
 
 每个 epoch 打印训练和验证的 mse、方向正确率 `dir`，以及验证集 `ic`。方向正确率是预测超额大于 0 是否和真实超额同号，只作记录。`ic` 决定留哪一轮。
 
-随机种子从 `20260417` 起。`N_SEEDS=1` 先试通，正式结果把笔记本里的 `N_SEEDS` 改成 5，预测时对各种子的超额取平均。已有最终的 `seed_k.pt` 会跳过。每个 epoch 会写 `seed_k.running.pt`，里面是到当时为止 Spearman 最高的权重。训练不能从 `running.pt` 接着跑，中断后这个种子会从头开始。
+当前 `N_SEEDS=3`，随机种子为 `20260417`、`20260418`、`20260419`，预测时对三个种子的超额等权平均。已有最终的 `seed_k.pt` 会跳过。每个 epoch 会写 `seed_k.running.pt`，里面是到当时为止 Spearman 最高的权重。保存及中断行为沿用原版：训练不能从 `running.pt` 接着跑，中断后这个种子会从头开始。
 
 权重目录：
 
 ```text
-/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body/models/{I20|I60}/
+/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_attention_v1/models/{I20|I60}/
 ```
 
 ## 预测与回测
@@ -102,7 +106,7 @@
 `predict_window` 只对 `test` 做推理，写出
 
 ```text
-/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body/results/pred_{I20|I60}.parquet
+/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_attention_v1/results/pred_{I20|I60}.parquet
 ```
 
 `pred` 是预测的 5 日超额，可以是负数。它和二分类版本的 `prob` 不是同一个量。`prob` 是“超额大于 0”的概率，范围在 0 到 1。两边选股时都是当天分数从高到低取前 10%。
@@ -121,8 +125,8 @@
 
 把本仓库的这一支放到服务器上单独一个目录。用该目录下的 Jupyter 内核从第一格按顺序跑。
 
-1. `03_generate_images.ipynb`：先 `MAX_CODES = 20` 看校验是否通过，再改成 `None` 生成全量。图写到 `k_pictures_gray_body`。
-2. `04_train_predict.ipynb`：确认第一格打印 `task = regression`，并且 `output` 指向 `k_pictures_gray_body`。训练后再跑预测。日志里应出现 `OOS mse=... dir_acc=... ic=...`，以及 `wrote .../pred_I20.parquet`。
+1. 重新启动内核，运行 `03_generate_images.ipynb`：默认 `MAX_CODES = None` 生成全量。图写到 `k_pictures_gray_body_i20_attention_v1/I20/`。
+2. `04_train_predict.ipynb`：确认第一格打印 `task = regression`，并且 `images`、`output` 均指向 `k_pictures_gray_body_i20_attention_v1`。训练完三个种子后再运行预测格。日志里应出现 `OOS mse=... dir_acc=... ic=...`，以及 `wrote .../pred_I20.parquet`。
 3. `05_plot_top10.ipynb`：Top 10%、十分位、随机分组、扣费对照。
 
 `WINDOW_KEY` 用 `"I20"` 或 `"I60"`，必须和已经生成的图一致。不要和正在读同一份 `images.npy` 的另一个训练同时跑，两边会抢网络盘。
@@ -138,7 +142,36 @@
 data/  models/  results/  figures/  logs/
 ```
 
-## I20 十分位
+## I20 时间注意力实验结果（3 个种子）
+
+2026-10-13 用户提供的公司平台运行结果：I20，含 MACD，2020–2025，五批资金，扣费前，三个种子等权平均。以下数值摘自结果图，未在本地重跑。组别 0 是预测最高的 10%，组别 9 是最低的 10%。年化超额使用日均超额乘以 252；累计超额是日超额累加。
+
+![I20 temporal attention, three seeds](I20_attention_3seed_decile.png)
+
+| 组别 | 年化超额 | 夏普率 | 日胜率 |
+|---|---|---|---|
+| 0 | 15.44% | 3.34564 | 57.612% |
+| 1 | 13.07% | 3.71924 | 60.056% |
+| 2 | 10.81% | 3.74986 | 60.545% |
+| 3 | 10.42% | 4.48098 | 61.522% |
+| 4 | 7.72% | 3.90367 | 60.824% |
+| 5 | 5.26% | 3.05851 | 58.589% |
+| 6 | 2.43% | 1.38171 | 54.539% |
+| 7 | -2.05% | -0.79017 | 46.718% |
+| 8 | -10.82% | -2.78155 | 40.852% |
+| 9 | -41.85% | -5.18481 | 35.824% |
+
+与原含 MACD、单种子的 Top10% 结果比较：
+
+| 指标 | 原模型，1 个种子 | 时间注意力，3 个种子 | 变化 |
+|---|---|---|---|
+| 年化超额 | 15.77% | 15.44% | -0.33 个百分点 |
+| 夏普率 | 3.78476 | 3.34564 | -0.43912 |
+| 日胜率 | 60.684% | 57.612% | -3.072 个百分点 |
+
+本次实验未改善 Top10% 扣费前收益与夏普率。模型与种子数同时变化，不能仅据这两张结果图归因于注意力层。当前保留代码和结果作为实验记录，不将其表述为已经验证的改进。
+
+## 原 I20 十分位（1 个种子）
 
 1 个种子，2020–2025，5 个组合，扣费前。组别 0 是预测超额最高的 10%。
 
