@@ -2,19 +2,25 @@
 
 用日频灰度蜡烛图预测未来 5 个交易日相对 688 平权的超额收益，再按预测超额做每日选股和 5 个组合的回测。
 
-当前工作区是含 MACD 的灰度实体回归版，并在原 CNN 后加入轻量时间注意力。I20 本次实验使用 3 个随机种子等权平均。图像生成、样本筛选、MSE 损失、训练轮数、验证集 Spearman 选模与五批资金回测沿用原框架。
+当前工作区进入第二轮实验：保留含 MACD 的灰度图、时间注意力 CNN、三个种子等权平均及原 MSE，仅将主选模指标改为验证集日均 Rank IC。原整体 Spearman 的最佳权重在同一次训练中单独保留作对照。图像、筛选、学习率、训练轮数与五批资金回测不变。第二轮尚未提供运行结果；下方已完成结果属于上一轮整体 Spearman 选模实验。
 
 ## 图像
 
-本次实验的服务器根目录是：
+本轮复用已有图像，图像根目录为：
 
 ```text
 /storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_attention_v1/
 ```
 
-图像在根目录下的 `I20/`（或 `I60/`），权重在 `models/{I20|I60}/`，预测和回测结果在 `results/`，日志和图表在 `logs/`、`figures/`。不要覆盖原来的 `k_pictures_gray_body`、`k_pictures_rgb_I20` 和 `k_pictures_gray_reg`。
+图像在该目录下的 `I20/`（或 `I60/`）。无需再次运行 03。本轮权重、预测、日志和图表单独写入：
 
-本地图像备用目录与定位文件在 `data/images/i20_attention_v1/`。服务器权重和预测目录不可写时，原有回退逻辑分别使用本地 `models/i20_attention_v1/` 和 `results/i20_attention_v1/`。实际路径以笔记本输出为准。
+```text
+/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_attention_daily_ic_v1/
+```
+
+主权重在 `models/{I20|I60}/seed_k.pt`；原整体规则的对照权重在 `models/{I20|I60}/pooled_spearman/seed_k.pt`。默认预测和回测结果在 `results/`，日志和图表在 `logs/`、`figures/`。原图片目录、上一轮权重和结果均保留。
+
+本地图像备用目录与定位文件仍在 `data/images/i20_attention_v1/`。服务器权重和预测目录不可写时，回退到新的本地 `models/i20_attention_daily_ic_v1/` 和 `results/i20_attention_daily_ic_v1/`。实际路径以笔记本输出为准。
 
 每个窗口目录里有：
 
@@ -87,18 +93,20 @@
 
 ## 训练
 
-在 `04_train_predict.ipynb` 里运行。优化器是 Adam，学习率固定 `1e-5`，没有学习率衰减，也没有早停。每个种子固定 10 个 epoch。留下的是验证集 Spearman 最高的那一轮：预测值和未截尾的 `future_ret` 的排序相关性。不一定是第 10 轮，也不按验证集 mse 选择。
+在 `04_train_predict.ipynb` 里运行。优化器是 Adam，学习率固定 `1e-5`，没有学习率衰减，也没有早停。每个种子固定 10 个 epoch。主权重留下验证集日均 Rank IC 最高的一轮：每天对预测值与未截尾 `future_ret` 计算 Spearman，再对有效日期等权平均。并列值使用平均秩；少于 3 只股票或分数/目标为常量的日期不计入，并记录有效日期数。没有有效日期时明确报错，不静默改用最后一轮。
+
+同一训练过程还保留原整体 Spearman 指标最高的一轮，只增加指标计算和权重保存，不额外训练一遍。原整体指标的双 argsort 实现保持不变，以复现上一轮选模方式；新日内指标使用标准平均秩。两套候选都只使用验证集，测试集不参与选模。
 
 训练集使用全部 `split == train` 的样本，不做类别下采样。像素均值和标准差在训练索引上抽 2 万张图估计，是一个标量。笔记本里 I20 的 batch 是 64，I60 是 32；`num_workers=0`，`pin_memory=False`。图像在网络盘上随机读取，多进程和锁页内存帮不上忙。
 
-每个 epoch 打印训练和验证的 mse、方向正确率 `dir`，以及验证集 `ic`。方向正确率是预测超额大于 0 是否和真实超额同号，只作记录。`ic` 决定留哪一轮。
+每轮打印训练/验证 mse、方向正确率、`pooled_ic`、`daily_ic` 和有效日期数。`daily_ic` 决定主模型。权重里的 `history.valid_ic` 仍是原整体指标，新增 `valid_daily_rank_ic`、`valid_ic_dates`、`valid_dates_total` 与 `selection_score`；权重也保存选模规则和最佳轮次。
 
-当前 `N_SEEDS=3`，随机种子为 `20260417`、`20260418`、`20260419`，预测时对三个种子的超额等权平均。已有最终的 `seed_k.pt` 会跳过。每个 epoch 会写 `seed_k.running.pt`，里面是到当时为止 Spearman 最高的权重。保存及中断行为沿用原版：训练不能从 `running.pt` 接着跑，中断后这个种子会从头开始。
+固定 `N_SEEDS=3`，随机种子为 `20260417`、`20260418`、`20260419`。训练函数默认值与配置均为 3，错误种子数会报错。只有主/对照两套权重都完整且元数据匹配时才跳过已有种子。每轮 `seed_k.running.pt` 保存当时主指标最好的权重；仍不支持断点续训，中断后该种子从头开始。对照最终权重先保存，再保存主最终权重；完成后删除 running 文件。
 
 权重目录：
 
 ```text
-/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_attention_v1/models/{I20|I60}/
+/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_attention_daily_ic_v1/models/{I20|I60}/
 ```
 
 ## 预测与回测
@@ -106,10 +114,12 @@
 `predict_window` 只对 `test` 做推理，写出
 
 ```text
-/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_attention_v1/results/pred_{I20|I60}.parquet
+/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_attention_daily_ic_v1/results/pred_{I20|I60}.parquet
 ```
 
 `pred` 是预测的 5 日超额，可以是负数。它和二分类版本的 `prob` 不是同一个量。`prob` 是“超额大于 0”的概率，范围在 0 到 1。两边选股时都是当天分数从高到低取前 10%。
+
+默认预测恰好读取三个主权重，不递归扫描对照子目录。可用 `predict_window(..., selection="pooled_spearman")` 对三个旧规则候选做额外推理，结果单独写为 `pred_I20_pooled_spearman.parquet`，不覆盖主预测。该选项只增加推理，不增加训练；05 默认仍使用主结果。对照供报告使用，不能根据测试结果反向选择规则。
 
 样本外还会打印 mse、方向正确率和 `pred` 与 `future_ret` 的相关系数。
 
@@ -125,8 +135,8 @@
 
 把本仓库的这一支放到服务器上单独一个目录。用该目录下的 Jupyter 内核从第一格按顺序跑。
 
-1. 重新启动内核，运行 `03_generate_images.ipynb`：默认 `MAX_CODES = None` 生成全量。图写到 `k_pictures_gray_body_i20_attention_v1/I20/`。
-2. `04_train_predict.ipynb`：确认第一格打印 `task = regression`，并且 `images`、`output` 均指向 `k_pictures_gray_body_i20_attention_v1`。训练完三个种子后再运行预测格。日志里应出现 `OOS mse=... dir_acc=... ic=...`，以及 `wrote .../pred_I20.parquet`。
+1. 本轮直接复用上一轮完整图像；不要重新生成或覆盖输入。若尚未生成完整图片，才运行 03 的 `MAX_CODES=None`。
+2. 重新启动内核，运行 `04_train_predict.ipynb`：确认 `select=daily_rank_ic`，`images` 指向 `k_pictures_gray_body_i20_attention_v1`，`output` 指向 `k_pictures_gray_body_i20_attention_daily_ic_v1`。训练完三个种子后运行预测格。日志里应出现 `daily_ic=...`、`pooled_ic=...`，以及 `wrote .../pred_I20.parquet`。
 3. `05_plot_top10.ipynb`：Top 10%、十分位、随机分组、扣费对照。
 
 `WINDOW_KEY` 用 `"I20"` 或 `"I60"`，必须和已经生成的图一致。不要和正在读同一份 `images.npy` 的另一个训练同时跑，两边会抢网络盘。
@@ -142,7 +152,7 @@
 data/  models/  results/  figures/  logs/
 ```
 
-## I20 时间注意力实验结果（3 个种子）
+## 上一轮 I20 时间注意力实验结果（3 个种子，整体 Spearman 选模）
 
 2026-10-13 用户提供的公司平台运行结果：I20，含 MACD，2020–2025，五批资金，扣费前，三个种子等权平均。以下数值摘自结果图，未在本地重跑。组别 0 是预测最高的 10%，组别 9 是最低的 10%。年化超额使用日均超额乘以 252；累计超额是日超额累加。
 

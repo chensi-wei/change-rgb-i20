@@ -1,7 +1,8 @@
 """Train / predict grayscale images as a regression on 5-day excess.
 
-Fixed epochs. The kept epoch is the one with the highest validation Spearman
-rank IC against the raw excess. The loss uses a winsorized, then z-scored target.
+Fixed epochs. Primary selection uses mean daily validation Rank IC. The legacy
+pooled Spearman winner is kept separately from the same training trajectory.
+The loss uses a winsorized, then z-scored target.
 """
 from __future__ import annotations
 
@@ -154,6 +155,47 @@ def _spearman(pred: np.ndarray, y: np.ndarray) -> float:
     return float((pr * yr).sum() / denom)
 
 
+def _validation_date_groups(dates) -> list[np.ndarray]:
+    """Local positions in validation-loader order, not original row indices."""
+    date_series = pd.Series(pd.to_datetime(np.asarray(dates))).dt.normalize()
+    if date_series.isna().any():
+        raise ValueError("验证样本日期含 NaT，无法计算日均 Rank IC。")
+    return [np.asarray(pos, dtype=np.int64) for pos in
+            date_series.groupby(date_series, sort=True).indices.values()]
+
+
+def _daily_rank_ic(pred: np.ndarray, y: np.ndarray,
+                   date_groups: list[np.ndarray]) -> tuple[float, int]:
+    """Equal-weight mean of per-date Spearman, with average ranks for ties."""
+    pred = np.asarray(pred, dtype=np.float64).reshape(-1)
+    y = np.asarray(y, dtype=np.float64).reshape(-1)
+    if len(pred) != len(y) or sum(len(g) for g in date_groups) != len(pred):
+        raise ValueError("验证预测、标签与日期分组长度不一致。")
+    if not np.isfinite(pred).all() or not np.isfinite(y).all():
+        raise ValueError("验证预测/标签出现 NaN 或 Inf，停止选模。")
+    correlations = []
+    for pos in date_groups:
+        if len(pos) < 3:
+            continue
+        pr = pd.Series(pred[pos]).rank(method="average").to_numpy(np.float64)
+        yr = pd.Series(y[pos]).rank(method="average").to_numpy(np.float64)
+        pr -= pr.mean()
+        yr -= yr.mean()
+        denom = float(np.sqrt(np.dot(pr, pr) * np.dot(yr, yr)))
+        if denom > 0:
+            correlations.append(float(np.dot(pr, yr) / denom))
+    if not correlations:
+        return float("nan"), 0
+    return float(np.mean(correlations)), len(correlations)
+
+
+def _load_ckpt(path: Path, device="cpu") -> dict:
+    try:
+        return torch.load(path, map_location=device, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=device)
+
+
 def _winsor_bounds(y_train: np.ndarray, cfg) -> tuple[float, float]:
     qs = getattr(cfg.cnn, "winsor_quantiles", None)
     if qs is None:
@@ -235,6 +277,10 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
     valid_idx = _finite_mask(labels_df, np.flatnonzero(split == "valid"))
     if len(train_idx) == 0 or len(valid_idx) == 0:
         raise RuntimeError("labels 需要 split 列为 train / valid，且 future_ret 为有限值")
+    date_groups = _validation_date_groups(labels_df.iloc[valid_idx]["date"])
+    selection = str(getattr(cfg.cnn, "select", "spearman"))
+    if selection not in {"spearman", "daily_rank_ic"}:
+        raise ValueError(f"不支持的选模指标 {selection!r}")
 
     y_all = labels_df[TARGET_COL].to_numpy(np.float32)
     rng.shuffle(train_idx)
@@ -250,7 +296,7 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
           f"train={len(train_idx)}  valid={len(valid_idx)}", flush=True)
     print(f"[seed {seed}] winsor [{y_lo:.6f}, {y_hi:.6f}]  "
           f"target mean={y_mean:.6f} std={y_std:.6f}  "
-          f"（损失用截尾后再标准化；选模型用原始超额的 Spearman）", flush=True)
+          f"（损失用截尾后再标准化；选模={selection}，只使用验证集原始超额）", flush=True)
 
     print(f"[seed {seed}] fitting pixel stats ...", flush=True)
     mean, std = fit_pixel_stats_indexed(images, train_idx)
@@ -284,13 +330,20 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
     best_ic = -float("inf")
     best_val = float("nan")
     best_val_dir = float("nan")
+    best_val_pooled_ic = float("nan")
+    best_val_daily_ic = float("nan")
+    best_valid_days = 0
     best_epoch = 0
     best_state = None
+    pooled_best_ic = -float("inf")
+    pooled_best_epoch = 0
+    pooled_best_state = None
+    pooled_best_metrics = None
     hist = []
     t0 = time.time()
     running_path = out_path.with_name(out_path.stem + ".running.pt")
     print(f"[seed {seed}] fixed {max_epochs} epochs, no early stop, "
-          f"keep highest valid Spearman IC", flush=True)
+          f"keep highest {selection}; also retain legacy pooled Spearman winner", flush=True)
     for epoch in range(1, max_epochs + 1):
         print(f"[seed {seed}] start epoch {epoch}/{max_epochs}", flush=True)
         tr_mse, tr_dir = _run_epoch(
@@ -300,22 +353,41 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
             model, dl_valid, device, criterion, y_mean, y_std, y_lo, y_hi, None,
             desc=f"seed{seed} ep{epoch} valid", collect=True)
         va_ic = _spearman(va_pred, va_y)
+        va_daily_ic, valid_days = _daily_rank_ic(va_pred, va_y, date_groups)
+        if selection == "daily_rank_ic" and valid_days == 0:
+            raise RuntimeError("没有可定义日 Rank IC 的验证日期（样本不足或分数/目标为常量）。")
+        selection_score = va_daily_ic if selection == "daily_rank_ic" else va_ic
         hist.append({
             "epoch": epoch,
             "train_mse": tr_mse, "train_dir": tr_dir,
             "valid_mse": va_mse, "valid_dir": va_dir, "valid_ic": va_ic,
+            "valid_daily_rank_ic": va_daily_ic, "valid_ic_dates": valid_days,
+            "valid_dates_total": len(date_groups),
+            "selection_score": selection_score,
         })
-        improved = np.isfinite(va_ic) and va_ic > best_ic
+        improved = np.isfinite(selection_score) and selection_score > best_ic
+        pooled_improved = np.isfinite(va_ic) and va_ic > pooled_best_ic
+        if improved or pooled_improved:
+            current_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
         if improved:
-            best_ic = va_ic
+            best_ic = selection_score
             best_val = va_mse
             best_val_dir = va_dir
+            best_val_pooled_ic = va_ic
+            best_val_daily_ic = va_daily_ic
+            best_valid_days = valid_days
             best_epoch = epoch
-            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            best_state = current_state
+        if pooled_improved:
+            pooled_best_ic = va_ic
+            pooled_best_epoch = epoch
+            pooled_best_state = current_state
+            pooled_best_metrics = hist[-1]
         mark = "  best" if improved else ""
         print(f"[seed {seed}] ep {epoch:02d}/{max_epochs}  "
               f"train mse={tr_mse:.6f} dir={tr_dir:.3f}  "
-              f"valid mse={va_mse:.6f} dir={va_dir:.3f} ic={va_ic:.4f}  "
+              f"valid mse={va_mse:.6f} dir={va_dir:.3f} pooled_ic={va_ic:.4f} "
+              f"daily_ic={va_daily_ic:.4f} dates={valid_days}/{len(date_groups)}  "
               f"best_epoch={best_epoch}{mark}", flush=True)
         payload = {
             "state_dict": best_state,
@@ -326,7 +398,10 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
             "task": "regression", "target": TARGET_COL,
             "history": hist, "best_epoch": best_epoch,
             "best_val_mse": best_val, "best_val_dir": best_val_dir,
-            "best_val_ic": best_ic,
+            "selection": selection, "best_selection_score": best_ic,
+            "best_val_ic": best_val_pooled_ic,
+            "best_valid_daily_rank_ic": best_val_daily_ic,
+            "best_valid_ic_dates": best_valid_days,
             "elapsed_s": time.time() - t0,
             "incomplete": True,
         }
@@ -334,38 +409,59 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
         print(f"[seed {seed}] wrote {running_path.name} after epoch {epoch}", flush=True)
 
     elapsed = time.time() - t0
-    if best_state is None:
-        best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-        best_epoch = max_epochs
-    _save_ckpt(out_path, {
-        "state_dict": best_state,
+    if best_state is None or pooled_best_state is None:
+        raise RuntimeError("没有可用的验证选模权重，不能以最后一轮静默替代。")
+    common = {
         "mean": mean, "std": std,
         "y_mean": y_mean, "y_std": y_std,
         "winsor_lo": y_lo, "winsor_hi": y_hi,
         "seed": seed, "window": window_key,
         "task": "regression", "target": TARGET_COL,
-        "history": hist, "best_epoch": best_epoch,
+        "history": hist, "epochs": len(hist), "elapsed_s": elapsed,
+        "incomplete": False,
+    }
+    pooled_path = out_path.parent / "pooled_spearman" / out_path.name
+    _save_ckpt(pooled_path, {
+        **common, "state_dict": pooled_best_state, "best_epoch": pooled_best_epoch,
+        "selection": "spearman", "best_selection_score": pooled_best_ic,
+        "best_val_mse": pooled_best_metrics["valid_mse"],
+        "best_val_dir": pooled_best_metrics["valid_dir"],
+        "best_val_ic": pooled_best_ic,
+        "best_valid_daily_rank_ic": pooled_best_metrics["valid_daily_rank_ic"],
+        "best_valid_ic_dates": pooled_best_metrics["valid_ic_dates"],
+    })
+    _save_ckpt(out_path, {
+        **common, "state_dict": best_state, "best_epoch": best_epoch,
         "best_val_mse": best_val, "best_val_dir": best_val_dir,
-        "best_val_ic": best_ic,
-        "epochs": len(hist), "elapsed_s": elapsed,
+        "selection": selection, "best_selection_score": best_ic,
+        "best_val_ic": best_val_pooled_ic,
+        "best_valid_daily_rank_ic": best_val_daily_ic,
+        "best_valid_ic_dates": best_valid_days,
     })
     if running_path.exists():
         running_path.unlink()
     print(f"[seed {seed}] saved {out_path}  best_epoch={best_epoch}/{len(hist)}  "
-          f"val_ic={best_ic:.4f} val_mse={best_val:.6f} val_dir={best_val_dir:.4f}  {elapsed:.1f}s",
+          f"{selection}={best_ic:.4f} val_mse={best_val:.6f} val_dir={best_val_dir:.4f}  "
+          f"pooled comparison epoch={pooled_best_epoch} saved {pooled_path}  {elapsed:.1f}s",
           flush=True)
     return {
         "seed": seed, "best_epoch": best_epoch, "best_val_mse": best_val,
-        "best_val_dir": best_val_dir, "best_val_ic": best_ic,
+        "best_val_dir": best_val_dir, "best_val_ic": best_val_pooled_ic,
+        "selection": selection, "best_selection_score": best_ic,
+        "best_valid_daily_rank_ic": best_val_daily_ic,
+        "pooled_best_epoch": pooled_best_epoch, "pooled_best_val_ic": pooled_best_ic,
+        "pooled_path": str(pooled_path),
         "epochs": len(hist), "elapsed_s": elapsed, "path": str(out_path),
     }
 
 
-def train_window(cfg, paths, window_key: str = WINDOW_KEY, n_seeds: int = 5,
+def train_window(cfg, paths, window_key: str = WINDOW_KEY, n_seeds: int = 3,
                  num_workers: int = 0, skip_existing: bool = True,
                  batch_size: int | None = None,
                  pin_memory: bool = False) -> list[dict]:
     window_key = normalize_window_key(window_key)
+    if int(n_seeds) != 3 or int(cfg.cnn.ensemble_seeds) != 3:
+        raise ValueError("本项目固定使用 3 个种子，n_seeds 和 ensemble_seeds 都必须为 3。")
     task = str(getattr(cfg.cnn, "task", ""))
     if task != "regression":
         raise RuntimeError(f"cnn.task 应为 regression，实际是 {task!r}")
@@ -373,19 +469,42 @@ def train_window(cfg, paths, window_key: str = WINDOW_KEY, n_seeds: int = 5,
     model_dir = resolve_model_dir(paths, cfg, window_key)
     print("images =", img_dir)
     print("models =", model_dir)
-    print(f"epochs = {int(cfg.cnn.max_epochs)}  （固定轮数，不早停，按验证集 Spearman IC 留最好一轮）")
+    print(f"epochs = {int(cfg.cnn.max_epochs)}  selection = {cfg.cnn.select} "
+          f"（固定轮数，只按验证集选模，另存整体 Spearman 对照）")
     images = np.load(img_dir / "images.npy", mmap_mode="r")
     labels = pd.read_parquet(img_dir / "labels.parquet")
     print("loaded", images.shape, "labels", len(labels), labels["split"].value_counts().to_dict())
     expect = image_hw(cfg, window_key)
     if images.ndim != 4 or tuple(images.shape[1:]) != expect:
         raise ValueError(f"期望 images (N,{expect[0]},{expect[1]},{expect[2]})，实际 {images.shape}")
+    if len(images) != len(labels):
+        raise ValueError("图像和标签行数不一致，停止训练。")
 
     results = []
     for k in range(n_seeds):
         seed = int(cfg.project.random_seed) + k
         ckpt = model_dir / f"seed_{k}.pt"
         if skip_existing and ckpt.exists():
+            pooled_path = model_dir / "pooled_spearman" / ckpt.name
+            if not pooled_path.exists():
+                raise RuntimeError(f"缺少整体 Spearman 对照 {pooled_path}，请使用新实验目录。")
+            saved = _load_ckpt(ckpt)
+            comparison = _load_ckpt(pooled_path)
+            for payload, expected_rule in ((saved, str(cfg.cnn.select)), (comparison, "spearman")):
+                if (payload.get("selection") != expected_rule or payload.get("seed") != seed
+                        or payload.get("window") != window_key or payload.get("incomplete", False)
+                        or payload.get("epochs") != int(cfg.cnn.max_epochs)):
+                    raise RuntimeError(f"{ckpt} 的选模规则、种子或训练轮数不匹配，请换新目录。")
+            results.append({
+                "seed": seed, "best_epoch": saved["best_epoch"],
+                "selection": saved["selection"], "best_selection_score": saved["best_selection_score"],
+                "best_val_ic": saved["best_val_ic"],
+                "best_valid_daily_rank_ic": saved["best_valid_daily_rank_ic"],
+                "pooled_best_epoch": comparison["best_epoch"],
+                "pooled_best_val_ic": comparison["best_val_ic"],
+                "epochs": saved["epochs"], "path": str(ckpt), "pooled_path": str(pooled_path),
+                "skipped_existing": True,
+            })
             print(f"skip seed {k} (exists {ckpt})")
             continue
         results.append(train_one_seed(
@@ -422,11 +541,16 @@ def _infer_pred(model, loader, device, y_mean: float, y_std: float) -> np.ndarra
 
 
 def predict_window(cfg, paths, window_key: str = WINDOW_KEY,
-                   num_workers: int = 0) -> pd.DataFrame:
+                   num_workers: int = 0, selection: str = "primary") -> pd.DataFrame:
     window_key = normalize_window_key(window_key)
     img_dir = resolve_window_dir(paths, cfg, window_key)
     model_dir = resolve_model_dir(paths, cfg, window_key)
     results_dir = resolve_results_dir(paths, cfg)
+    if selection not in {"primary", "pooled_spearman"}:
+        raise ValueError("selection 只能是 primary 或 pooled_spearman。")
+    expected_rule = str(cfg.cnn.select) if selection == "primary" else "spearman"
+    if selection == "pooled_spearman":
+        model_dir = model_dir / "pooled_spearman"
 
     images = np.load(img_dir / "images.npy", mmap_mode="r")
     labels = pd.read_parquet(img_dir / "labels.parquet")
@@ -443,15 +567,20 @@ def predict_window(cfg, paths, window_key: str = WINDOW_KEY,
     ckpts = _seed_ckpts(model_dir)
     if not ckpts:
         raise FileNotFoundError(f"没有权重 {model_dir}/seed_*.pt")
+    if {p.name for p in ckpts} != {f"seed_{k}.pt" for k in range(3)}:
+        raise RuntimeError("预测目录必须恰好包含 seed_0.pt、seed_1.pt、seed_2.pt，不能混入其他权重。")
 
     device = _pick_device()
     batch = int(cfg.cnn.batch_size) * 4
     ensemble = []
     for ck_path in ckpts:
-        try:
-            ck = torch.load(ck_path, map_location=device, weights_only=False)
-        except TypeError:
-            ck = torch.load(ck_path, map_location=device)
+        ck = _load_ckpt(ck_path, device)
+        seed_index = int(ck_path.stem.split("_")[1])
+        if (ck.get("selection") != expected_rule
+                or ck.get("seed") != int(cfg.project.random_seed) + seed_index
+                or ck.get("window") != window_key or ck.get("incomplete", False)
+                or ck.get("epochs") != int(cfg.cnn.max_epochs)):
+            raise RuntimeError(f"{ck_path} 的选模规则/种子/轮数不匹配或训练尚未完成。")
         if ck.get("task") not in (None, "regression"):
             raise RuntimeError(f"{ck_path} 不是回归权重（task={ck.get('task')!r}）")
         if "y_mean" not in ck or "y_std" not in ck:
@@ -476,7 +605,8 @@ def predict_window(cfg, paths, window_key: str = WINDOW_KEY,
     for col in ("stock_ret", "mkt_ret"):
         if col in test_labels.columns:
             out[col] = test_labels[col].values
-    out_path = results_dir / f"pred_{window_key}.parquet"
+    suffix = "" if selection == "primary" else "_pooled_spearman"
+    out_path = results_dir / f"pred_{window_key}{suffix}.parquet"
     out.to_parquet(out_path, index=False)
     yt = out["future_ret"].to_numpy(np.float64)
     mse = float(np.mean((avg - yt) ** 2))

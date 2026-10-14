@@ -7,12 +7,12 @@ paths:
   images: data/images/i20_attention_v1
   # 新实验图像和定位文件单独保存，避免读取或覆盖旧实验。
   images_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_attention_v1"
-  output_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_attention_v1"
+  output_remote: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_attention_daily_ic_v1"
   pingquan_csv: "/storage/server/227server/marketdata/pingquan/daily/pingquan.csv"
-  figures: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_attention_v1/figures"
-  logs: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_attention_v1/logs"
-  models: models/i20_attention_v1
-  results: results/i20_attention_v1
+  figures: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_attention_daily_ic_v1/figures"
+  logs: "/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_attention_daily_ic_v1/logs"
+  models: models/i20_attention_daily_ic_v1
+  results: results/i20_attention_daily_ic_v1
 
 data:
   train_start: "2015-01-01"
@@ -49,7 +49,7 @@ cnn:
   in_channels: 1
   temporal_attention: true
   winsor_quantiles: [0.01, 0.99]
-  select: spearman
+  select: daily_rank_ic
   conv_kernel:  [5, 3]
   conv_stride:  [3, 1]
   conv_padding: [12, 1]
