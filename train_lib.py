@@ -2,7 +2,8 @@
 
 Fixed epochs. Primary selection uses mean daily validation Rank IC. The legacy
 pooled Spearman winner is kept separately from the same training trajectory.
-The loss uses a winsorized, then z-scored target.
+The loss uses a winsorized, then z-scored target, with an optional same-date
+RankNet term. Dates are used for training pairs only, never as model features.
 """
 from __future__ import annotations
 
@@ -15,10 +16,10 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
 from tqdm import tqdm
 
-from cnn import build_model
+from cnn import build_model, model_spec
 
 REMOTE = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body")
 OUTPUT_REMOTE = Path("/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body")
@@ -104,15 +105,20 @@ def _seed_ckpts(model_dir: Path) -> list[Path]:
 
 
 class IndexedImageDataset(Dataset):
-    """Rows of a memmap npy, shape (3, H, W). Scalar mean/std. Target is float excess."""
+    """Rows of a memmap npy. Optional local date IDs are only for training pairs."""
 
     def __init__(self, images: np.ndarray, indices: np.ndarray, targets: np.ndarray,
-                 mean: float = 0.0, std: float = 1.0):
+                 mean: float = 0.0, std: float = 1.0, date_ids=None):
         self.images = images
         self.indices = np.asarray(indices, dtype=np.int64)
         self.targets = np.asarray(targets, dtype=np.float32)
         self.mean = float(mean)
         self.std = float(std) if std > 0 else 1.0
+        self.date_ids = None if date_ids is None else np.asarray(date_ids, dtype=np.int64)
+        if len(self.targets) != len(self.indices):
+            raise ValueError("数据集索引与标签长度不一致。")
+        if self.date_ids is not None and len(self.date_ids) != len(self.indices):
+            raise ValueError("训练日期与数据集局部索引长度不一致。")
 
     def __len__(self) -> int:
         return len(self.indices)
@@ -121,7 +127,113 @@ class IndexedImageDataset(Dataset):
         x = self.images[int(self.indices[i])].astype(np.float32)
         x = (x - self.mean) / self.std
         y = float(self.targets[i])
-        return torch.from_numpy(x), torch.tensor(y, dtype=torch.float32)
+        sample = (torch.from_numpy(x), torch.tensor(y, dtype=torch.float32))
+        if self.date_ids is not None:
+            return (*sample, int(self.date_ids[i]))
+        return sample
+
+
+class SameDateBatchSampler(Sampler):
+    """Shuffle small date chunks, then pack full batches; use every row once.
+
+    Grouping uses date IDs only. Each epoch shuffles rows within each date and
+    shuffles chunks across dates, so typical batches contain several dates.
+    """
+
+    def __init__(self, date_ids, batch_size: int, group_size: int, seed: int):
+        ids = np.asarray(date_ids, dtype=np.int64)
+        self.batch_size = int(batch_size)
+        self.group_size = int(group_size)
+        self.seed = int(seed)
+        self.epoch = 0
+        if ids.ndim != 1 or len(ids) == 0 or (ids < 0).any():
+            raise ValueError("训练日期 ID 无效。")
+        if self.group_size < 2 or self.batch_size < 2 * self.group_size:
+            raise ValueError("排序训练要求 group_size >= 2 且 batch_size >= 2 * group_size。")
+        series = pd.Series(ids)
+        self.groups = [np.asarray(pos, dtype=np.int64) for pos in
+                       series.groupby(series, sort=True).indices.values()]
+        self.size = len(ids)
+
+    def set_epoch(self, epoch: int):
+        self.epoch = int(epoch)
+
+    def __len__(self):
+        return (self.size + self.batch_size - 1) // self.batch_size
+
+    def __iter__(self):
+        rng = np.random.default_rng(self.seed + self.epoch)
+        chunks = []
+        for positions in self.groups:
+            shuffled = rng.permutation(positions)
+            chunks.extend(shuffled[i:i + self.group_size]
+                          for i in range(0, len(shuffled), self.group_size))
+        pending = []
+        for ci in rng.permutation(len(chunks)):
+            pending.extend(chunks[int(ci)].tolist())
+            if len(pending) >= self.batch_size:
+                yield pending[:self.batch_size]
+                pending = pending[self.batch_size:]
+        if pending:
+            yield pending
+
+
+def _training_objective(cfg) -> dict:
+    """Saved in checkpoints so skip/inference cannot silently mix experiments."""
+    name = str(getattr(cfg.cnn, "loss", "mse"))
+    if name == "mse":
+        return {"version": 1, "name": "mse", "sampler": "random"}
+    if name != "mse_ranknet":
+        raise ValueError(f"不支持的训练损失 {name!r}")
+    rank = getattr(cfg.cnn, "rank_loss", None)
+    if rank is None:
+        raise ValueError("mse_ranknet 需要 cnn.rank_loss 配置。")
+    spec = {
+        "version": 1, "name": name, "sampler": "same_date_chunks",
+        "weight": float(rank.weight), "min_gap_z": float(rank.min_gap_z),
+        "max_pairs": int(rank.max_pairs), "group_size": int(rank.group_size),
+    }
+    if (not np.isfinite(spec["weight"]) or spec["weight"] <= 0
+            or not np.isfinite(spec["min_gap_z"]) or spec["min_gap_z"] < 0
+            or spec["max_pairs"] < 1 or spec["group_size"] < 2):
+        raise ValueError("排序损失权重/收益差阈值/配对上限/日期组大小无效。")
+    return spec
+
+
+def _check_training_objective(payload: dict, expected: dict, path: Path,
+                              batch_size: int | None = None):
+    if payload.get("training_objective") != expected:
+        raise RuntimeError(f"{path} 的训练损失或取样配置不匹配，请使用本轮独立目录。")
+    if batch_size is not None and payload.get("train_batch_size") != batch_size:
+        raise RuntimeError(f"{path} 的训练 batch_size 不匹配，请使用新目录。")
+
+
+def _check_model_spec(payload: dict, expected: dict, path: Path):
+    if payload.get("model_spec") != expected:
+        raise RuntimeError(
+            f"{path} 缺少模型结构记录或与当前逐层配置不匹配。"
+            "请使用本轮独立目录；复现旧实验须使用对应版本的代码和配置。")
+
+
+def _same_date_rank_loss(pred_z, y_z, date_ids, min_gap_z: float, max_pairs: int):
+    """Mean softplus(-sign(y_i-y_j)*(s_i-s_j)), on distinct same-date pairs.
+
+    Targets are clipped/z-scored using training-only statistics. Small gaps
+    (including ties from clipping) are ignored only by this auxiliary term;
+    every row still contributes to MSE. At most max_pairs are sampled uniformly.
+    """
+    ij = torch.triu_indices(pred_z.numel(), pred_z.numel(), offset=1, device=pred_z.device)
+    left, right = ij[0], ij[1]
+    gap = y_z[left] - y_z[right]
+    keep = (date_ids[left] == date_ids[right]) & (gap.abs() > min_gap_z)
+    candidates = torch.nonzero(keep, as_tuple=False).flatten()
+    if candidates.numel() > max_pairs:
+        candidates = candidates[torch.randperm(candidates.numel(), device=pred_z.device)[:max_pairs]]
+    count = candidates.numel()
+    if count == 0:
+        return pred_z.sum() * 0.0, 0
+    margin = (pred_z[left[candidates]] - pred_z[right[candidates]]) * gap[candidates].sign()
+    return nn.functional.softplus(-margin).mean(), count
 
 
 def fit_pixel_stats_indexed(images: np.ndarray, indices: np.ndarray) -> tuple[float, float]:
@@ -212,26 +324,46 @@ def _winsor_bounds(y_train: np.ndarray, cfg) -> tuple[float, float]:
 
 def _run_epoch(model, loader, device, criterion, y_mean: float, y_std: float,
                y_lo: float, y_hi: float, optimiser=None, desc: str = "",
-               collect: bool = False):
-    """Loss is on the winsorized then z-scored excess. Logged mse uses that same clip."""
+               collect: bool = False, objective: dict | None = None):
+    """Train with MSE plus optional same-date ranking; validate without ranking."""
     train_mode = optimiser is not None
     model.train(train_mode)
     total_se = 0.0
     correct = 0
     seen = 0
+    objective_sum = 0.0
+    rank_sum = 0.0
+    pair_count = 0
+    rank_batches = 0
+    batches = 0
+    rank_enabled = train_mode and objective is not None and objective["name"] == "mse_ranknet"
     preds: list[np.ndarray] = []
     ys: list[np.ndarray] = []
     it = tqdm(loader, desc=desc or ("train" if train_mode else "valid"),
               leave=False, mininterval=2.0)
-    for xb, yb in it:
+    for sample in it:
+        xb, yb = sample[:2]
         xb = xb.to(device, non_blocking=True)
         y_raw = yb.to(device, non_blocking=True).float().view(-1)
         y_clip = torch.clamp(y_raw, y_lo, y_hi)
         y_z = (y_clip - y_mean) / y_std
         if train_mode:
             optimiser.zero_grad(set_to_none=True)
-        pred_z = model(xb).view(-1)
-        loss = criterion(pred_z, y_z)
+        with torch.set_grad_enabled(train_mode):
+            pred_z = model(xb).view(-1)
+            loss = criterion(pred_z, y_z)
+            if rank_enabled:
+                if len(sample) != 3:
+                    raise RuntimeError("排序训练缺少同日分组 ID，停止训练。")
+                date_ids = sample[2].to(device, non_blocking=True)
+                rank_loss, count = _same_date_rank_loss(
+                    pred_z, y_z, date_ids, objective["min_gap_z"], objective["max_pairs"])
+                loss = loss + objective["weight"] * rank_loss
+                rank_sum += float(rank_loss.detach()) * xb.size(0)
+                pair_count += count
+                rank_batches += int(count > 0)
+            if not torch.isfinite(loss).item():
+                raise RuntimeError(f"{desc} 出现非有限损失，停止保存本轮权重。")
         if train_mode:
             loss.backward()
             optimiser.step()
@@ -239,15 +371,21 @@ def _run_epoch(model, loader, device, criterion, y_mean: float, y_std: float,
         total_se += torch.sum((pred_raw - y_clip) ** 2).item()
         correct += ((pred_raw > 0) == (y_raw > 0)).sum().item()
         seen += xb.size(0)
+        objective_sum += float(loss.detach()) * xb.size(0)
+        batches += 1
         if collect:
             preds.append(pred_raw.detach().cpu().numpy())
             ys.append(y_raw.detach().cpu().numpy())
     n = max(seen, 1)
     mse = total_se / n
     direction = correct / n
+    stats = {"loss_z": objective_sum / n, "rank_loss": rank_sum / n,
+             "rank_pairs": pair_count, "rank_batches": rank_batches, "batches": batches}
+    if rank_enabled and rank_batches == 0:
+        raise RuntimeError("整轮没有有效同日股票对，排序项未生效，停止训练。")
     if collect:
-        return mse, direction, np.concatenate(preds), np.concatenate(ys)
-    return mse, direction
+        return mse, direction, np.concatenate(preds), np.concatenate(ys), stats
+    return mse, direction, stats
 
 
 def _save_ckpt(out_path: Path, payload: dict) -> None:
@@ -281,6 +419,10 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
     selection = str(getattr(cfg.cnn, "select", "spearman"))
     if selection not in {"spearman", "daily_rank_ic"}:
         raise ValueError(f"不支持的选模指标 {selection!r}")
+    objective = _training_objective(cfg)
+    architecture = model_spec(window_key, cfg)
+    rank_enabled = objective["name"] == "mse_ranknet"
+    batch = int(batch_size) if batch_size is not None else (32 if window_key == "I60" else 64)
 
     y_all = labels_df[TARGET_COL].to_numpy(np.float32)
     rng.shuffle(train_idx)
@@ -292,28 +434,45 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
     if not np.isfinite(y_std) or y_std <= 0:
         y_std = 1.0
 
+    train_date_ids = None
+    train_sampler = None
+    if rank_enabled:
+        # This slice uses training rows only; no valid/test dates or targets.
+        train_dates = pd.to_datetime(labels_df.iloc[train_idx]["date"]).dt.normalize()
+        if train_dates.isna().any():
+            raise ValueError("训练日期含 NaT，无法构造同日股票对。")
+        train_date_ids = pd.factorize(train_dates, sort=True)[0]
+        train_sampler = SameDateBatchSampler(train_date_ids, batch, objective["group_size"], seed)
+        y_train_z = (y_w - y_mean) / y_std
+        if not any(len(g) > 1 and np.ptp(y_train_z[g]) > objective["min_gap_z"]
+                   for g in train_sampler.groups):
+            raise ValueError("训练集没有满足收益差阈值的同日股票对，未启动训练。")
+
     print(f"[seed {seed}] device={device}  regression target={TARGET_COL}  "
           f"train={len(train_idx)}  valid={len(valid_idx)}", flush=True)
     print(f"[seed {seed}] winsor [{y_lo:.6f}, {y_hi:.6f}]  "
           f"target mean={y_mean:.6f} std={y_std:.6f}  "
           f"（损失用截尾后再标准化；选模={selection}，只使用验证集原始超额）", flush=True)
+    print(f"[seed {seed}] training objective={objective}", flush=True)
+    print(f"[seed {seed}] model spec={architecture}", flush=True)
 
     print(f"[seed {seed}] fitting pixel stats ...", flush=True)
     mean, std = fit_pixel_stats_indexed(images, train_idx)
     print(f"[seed {seed}] pixel mean={mean:.4f} std={std:.4f}", flush=True)
 
-    ds_train = IndexedImageDataset(images, train_idx, y_all[train_idx], mean, std)
+    ds_train = IndexedImageDataset(images, train_idx, y_all[train_idx], mean, std,
+                                   date_ids=train_date_ids)
     ds_valid = IndexedImageDataset(images, valid_idx, y_all[valid_idx], mean, std)
-    if batch_size is None:
-        batch = 32 if window_key == "I60" else 64
-    else:
-        batch = int(batch_size)
     pin = bool(pin_memory) and device.type == "cuda"
     n_train_batches = int(np.ceil(len(ds_train) / max(batch, 1)))
     print(f"[seed {seed}] batch={batch}  train_batches≈{n_train_batches}  "
           f"pin_memory={pin}", flush=True)
-    dl_train = DataLoader(ds_train, batch_size=batch, shuffle=True,
-                          num_workers=num_workers, pin_memory=pin)
+    if train_sampler is None:
+        dl_train = DataLoader(ds_train, batch_size=batch, shuffle=True,
+                              num_workers=num_workers, pin_memory=pin)
+    else:
+        dl_train = DataLoader(ds_train, batch_sampler=train_sampler,
+                              num_workers=num_workers, pin_memory=pin)
     dl_valid = DataLoader(ds_valid, batch_size=batch, shuffle=False,
                           num_workers=num_workers, pin_memory=pin)
 
@@ -345,11 +504,14 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
     print(f"[seed {seed}] fixed {max_epochs} epochs, no early stop, "
           f"keep highest {selection}; also retain legacy pooled Spearman winner", flush=True)
     for epoch in range(1, max_epochs + 1):
+        epoch_t0 = time.time()
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch - 1)
         print(f"[seed {seed}] start epoch {epoch}/{max_epochs}", flush=True)
-        tr_mse, tr_dir = _run_epoch(
+        tr_mse, tr_dir, tr_stats = _run_epoch(
             model, dl_train, device, criterion, y_mean, y_std, y_lo, y_hi, optimiser,
-            desc=f"seed{seed} ep{epoch} train")
-        va_mse, va_dir, va_pred, va_y = _run_epoch(
+            desc=f"seed{seed} ep{epoch} train", objective=objective)
+        va_mse, va_dir, va_pred, va_y, _ = _run_epoch(
             model, dl_valid, device, criterion, y_mean, y_std, y_lo, y_hi, None,
             desc=f"seed{seed} ep{epoch} valid", collect=True)
         va_ic = _spearman(va_pred, va_y)
@@ -360,6 +522,10 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
         hist.append({
             "epoch": epoch,
             "train_mse": tr_mse, "train_dir": tr_dir,
+            "train_loss_z": tr_stats["loss_z"], "train_rank_loss": tr_stats["rank_loss"],
+            "train_rank_pairs": tr_stats["rank_pairs"],
+            "train_rank_batches": tr_stats["rank_batches"], "train_batches": tr_stats["batches"],
+            "epoch_elapsed_s": time.time() - epoch_t0,
             "valid_mse": va_mse, "valid_dir": va_dir, "valid_ic": va_ic,
             "valid_daily_rank_ic": va_daily_ic, "valid_ic_dates": valid_days,
             "valid_dates_total": len(date_groups),
@@ -388,6 +554,9 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
               f"train mse={tr_mse:.6f} dir={tr_dir:.3f}  "
               f"valid mse={va_mse:.6f} dir={va_dir:.3f} pooled_ic={va_ic:.4f} "
               f"daily_ic={va_daily_ic:.4f} dates={valid_days}/{len(date_groups)}  "
+              f"loss_z={tr_stats['loss_z']:.4f} rank={tr_stats['rank_loss']:.4f} "
+              f"pairs={tr_stats['rank_pairs']} rank_batches={tr_stats['rank_batches']}/{tr_stats['batches']}  "
+              f"epoch_s={hist[-1]['epoch_elapsed_s']:.1f}  "
               f"best_epoch={best_epoch}{mark}", flush=True)
         payload = {
             "state_dict": best_state,
@@ -396,6 +565,8 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
             "winsor_lo": y_lo, "winsor_hi": y_hi,
             "seed": seed, "window": window_key,
             "task": "regression", "target": TARGET_COL,
+            "training_objective": objective, "train_batch_size": batch,
+            "model_spec": architecture,
             "history": hist, "best_epoch": best_epoch,
             "best_val_mse": best_val, "best_val_dir": best_val_dir,
             "selection": selection, "best_selection_score": best_ic,
@@ -417,6 +588,8 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
         "winsor_lo": y_lo, "winsor_hi": y_hi,
         "seed": seed, "window": window_key,
         "task": "regression", "target": TARGET_COL,
+        "training_objective": objective, "train_batch_size": batch,
+        "model_spec": architecture,
         "history": hist, "epochs": len(hist), "elapsed_s": elapsed,
         "incomplete": False,
     }
@@ -446,6 +619,8 @@ def train_one_seed(images, labels_df, cfg, window_key, seed, out_path: Path,
           flush=True)
     return {
         "seed": seed, "best_epoch": best_epoch, "best_val_mse": best_val,
+        "training_objective": objective, "train_batch_size": batch,
+        "model_spec": architecture,
         "best_val_dir": best_val_dir, "best_val_ic": best_val_pooled_ic,
         "selection": selection, "best_selection_score": best_ic,
         "best_valid_daily_rank_ic": best_val_daily_ic,
@@ -462,6 +637,9 @@ def train_window(cfg, paths, window_key: str = WINDOW_KEY, n_seeds: int = 3,
     window_key = normalize_window_key(window_key)
     if int(n_seeds) != 3 or int(cfg.cnn.ensemble_seeds) != 3:
         raise ValueError("本项目固定使用 3 个种子，n_seeds 和 ensemble_seeds 都必须为 3。")
+    objective = _training_objective(cfg)
+    architecture = model_spec(window_key, cfg)
+    expected_batch = int(batch_size) if batch_size is not None else (32 if window_key == "I60" else 64)
     task = str(getattr(cfg.cnn, "task", ""))
     if task != "regression":
         raise RuntimeError(f"cnn.task 应为 regression，实际是 {task!r}")
@@ -475,6 +653,8 @@ def train_window(cfg, paths, window_key: str = WINDOW_KEY, n_seeds: int = 3,
     labels = pd.read_parquet(img_dir / "labels.parquet")
     print("loaded", images.shape, "labels", len(labels), labels["split"].value_counts().to_dict())
     expect = image_hw(cfg, window_key)
+    if architecture["input_chw"] != list(expect):
+        raise ValueError("CNN 输入通道/尺寸与图像配置不一致。")
     if images.ndim != 4 or tuple(images.shape[1:]) != expect:
         raise ValueError(f"期望 images (N,{expect[0]},{expect[1]},{expect[2]})，实际 {images.shape}")
     if len(images) != len(labels):
@@ -491,12 +671,16 @@ def train_window(cfg, paths, window_key: str = WINDOW_KEY, n_seeds: int = 3,
             saved = _load_ckpt(ckpt)
             comparison = _load_ckpt(pooled_path)
             for payload, expected_rule in ((saved, str(cfg.cnn.select)), (comparison, "spearman")):
+                _check_training_objective(payload, objective, ckpt, expected_batch)
+                _check_model_spec(payload, architecture, ckpt)
                 if (payload.get("selection") != expected_rule or payload.get("seed") != seed
                         or payload.get("window") != window_key or payload.get("incomplete", False)
                         or payload.get("epochs") != int(cfg.cnn.max_epochs)):
                     raise RuntimeError(f"{ckpt} 的选模规则、种子或训练轮数不匹配，请换新目录。")
             results.append({
                 "seed": seed, "best_epoch": saved["best_epoch"],
+                "training_objective": objective, "train_batch_size": expected_batch,
+                "model_spec": architecture,
                 "selection": saved["selection"], "best_selection_score": saved["best_selection_score"],
                 "best_val_ic": saved["best_val_ic"],
                 "best_valid_daily_rank_ic": saved["best_valid_daily_rank_ic"],
@@ -543,6 +727,8 @@ def _infer_pred(model, loader, device, y_mean: float, y_std: float) -> np.ndarra
 def predict_window(cfg, paths, window_key: str = WINDOW_KEY,
                    num_workers: int = 0, selection: str = "primary") -> pd.DataFrame:
     window_key = normalize_window_key(window_key)
+    objective = _training_objective(cfg)
+    architecture = model_spec(window_key, cfg)
     img_dir = resolve_window_dir(paths, cfg, window_key)
     model_dir = resolve_model_dir(paths, cfg, window_key)
     results_dir = resolve_results_dir(paths, cfg)
@@ -575,6 +761,8 @@ def predict_window(cfg, paths, window_key: str = WINDOW_KEY,
     ensemble = []
     for ck_path in ckpts:
         ck = _load_ckpt(ck_path, device)
+        _check_training_objective(ck, objective, ck_path)
+        _check_model_spec(ck, architecture, ck_path)
         seed_index = int(ck_path.stem.split("_")[1])
         if (ck.get("selection") != expected_rule
                 or ck.get("seed") != int(cfg.project.random_seed) + seed_index

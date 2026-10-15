@@ -5,6 +5,79 @@ import torch
 import torch.nn as nn
 
 
+def _layer_pairs(value, count: int, name: str) -> list[list[int]]:
+    """Accept one [height, width] pair or exactly one pair per conv block."""
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"{name} 必须是整数对或逐层整数对列表。")
+    if len(value) == 2 and all(type(v) is int for v in value):
+        value = [value] * count
+    if len(value) != count:
+        raise ValueError(f"{name} 需要 {count} 层参数，实际为 {len(value)} 层。")
+    minimum = 0 if name == "conv_padding" else 1
+    pairs = []
+    for pair in value:
+        if (not isinstance(pair, (list, tuple)) or len(pair) != 2
+                or any(type(v) is not int or v < minimum for v in pair)):
+            raise ValueError(f"{name} 每层须为两个 >= {minimum} 的整数，收到 {pair!r}。")
+        pairs.append(list(pair))
+    return pairs
+
+
+def _window_value(value, window_key: str):
+    """Window mapping from helpers._to_namespace, or a legacy shared list."""
+    if isinstance(value, (list, tuple)):
+        return value
+    if isinstance(value, dict) and window_key in value:
+        return value[window_key]
+    if hasattr(value, window_key):
+        return getattr(value, window_key)
+    raise ValueError(f"卷积参数缺少 {window_key} 配置。")
+
+
+def model_spec(window_key: str, cfg) -> dict:
+    """Resolve actual architecture and shapes without building/running a model."""
+    cnn_cfg = cfg.cnn if hasattr(cfg, "cnn") else cfg
+    if hasattr(cfg, "image"):
+        height = int(cfg.image.height)
+        width = int(getattr(cfg.image.windows, window_key)) * int(cfg.image.px_per_day)
+        in_ch = int(getattr(cnn_cfg, "in_channels", getattr(cfg.image, "channels", 1)))
+    else:
+        height, width = 100, {"I20": 60, "I60": 180}[window_key]
+        in_ch = int(getattr(cnn_cfg, "in_channels", 1))
+    filters = list(getattr(cnn_cfg.filters, window_key))
+    if not filters or any(type(v) is not int or v <= 0 for v in filters):
+        raise ValueError("卷积通道数必须是非空正整数列表。")
+    spec = {
+        "architecture": "price_image_cnn_layerwise_v1",
+        "window": window_key, "input_chw": [in_ch, height, width],
+        "filters": filters, "n_out": 1,
+        "leaky_relu_slope": float(cnn_cfg.leaky_relu_slope),
+        "dropout_fc": float(cnn_cfg.dropout_fc),
+        "temporal_attention": bool(getattr(cnn_cfg, "temporal_attention", False)),
+        "conv_dilation": [1, 1],
+    }
+    for name in ("conv_kernel", "conv_stride", "conv_padding"):
+        spec[name] = _layer_pairs(_window_value(getattr(cnn_cfg, name), window_key),
+                                  len(filters), name)
+    pool = _layer_pairs(cnn_cfg.pool_kernel, 1, "pool_kernel")[0]
+    pool_stride = _layer_pairs(getattr(cnn_cfg, "pool_stride", pool), 1, "pool_stride")[0]
+    if pool_stride != pool:
+        raise ValueError("当前原框架的池化步长须等于 pool_kernel，请勿仅修改 pool_stride。")
+    spec["pool_kernel"] = pool
+    spec["pool_stride"] = pool_stride
+    spec["block_hw"] = []
+    for i, (kernel, stride, padding) in enumerate(zip(
+            spec["conv_kernel"], spec["conv_stride"], spec["conv_padding"])):
+        height = (height + 2 * padding[0] - kernel[0]) // stride[0] + 1
+        width = (width + 2 * padding[1] - kernel[1]) // stride[1] + 1
+        height = (height - pool[0]) // pool_stride[0] + 1
+        width = (width - pool[1]) // pool_stride[1] + 1
+        if height <= 0 or width <= 0:
+            raise ValueError(f"{window_key} 第 {i + 1} 层尺寸无效，请检查逐层卷积/池化参数。")
+        spec["block_hw"].append([height, width])
+    return spec
+
+
 class ConvBlock(nn.Module):
     def __init__(self, in_ch: int, out_ch: int,
                  kernel=(5, 3), stride=(3, 1), padding=(12, 1),
@@ -51,10 +124,13 @@ class CNNPriceImage(nn.Module):
         super().__init__()
         layers: list[nn.Module] = []
         in_ch = int(in_ch)
-        for out_ch in filters:
+        kernels = _layer_pairs(conv_kernel, len(filters), "conv_kernel")
+        strides = _layer_pairs(conv_stride, len(filters), "conv_stride")
+        paddings = _layer_pairs(conv_padding, len(filters), "conv_padding")
+        for i, out_ch in enumerate(filters):
             layers.append(ConvBlock(
                 in_ch, out_ch,
-                kernel=conv_kernel, stride=conv_stride, padding=conv_padding,
+                kernel=tuple(kernels[i]), stride=tuple(strides[i]), padding=tuple(paddings[i]),
                 pool=pool_kernel, leaky_slope=leaky_slope,
             ))
             in_ch = out_ch
@@ -85,32 +161,19 @@ def init_weights(module: nn.Module) -> None:
 
 def build_model(window_key: str, cfg) -> CNNPriceImage:
     """``cfg`` is the full config. Also accepts ``cfg.cnn`` from older notebooks."""
-    if hasattr(cfg, "cnn"):
-        cnn_cfg = cfg.cnn
-        image = cfg.image
-        window = int(getattr(image.windows, window_key))
-        height = int(image.height)
-        width = window * int(image.px_per_day)
-    else:
-        cnn_cfg = cfg
-        height = 100
-        width = {"I20": 60, "I60": 180}[window_key]
-    filters = list(getattr(cnn_cfg.filters, window_key))
-    if hasattr(cfg, "image"):
-        in_ch = int(getattr(cnn_cfg, "in_channels", getattr(cfg.image, "channels", 1)))
-    else:
-        in_ch = int(getattr(cnn_cfg, "in_channels", 1))
+    spec = model_spec(window_key, cfg)
+    in_ch, height, width = spec["input_chw"]
     model = CNNPriceImage(
-        filters=filters,
-        n_out=1,
+        filters=spec["filters"],
+        n_out=spec["n_out"],
         in_ch=in_ch,
-        dropout_fc=float(cnn_cfg.dropout_fc),
-        conv_kernel=tuple(cnn_cfg.conv_kernel),
-        conv_stride=tuple(cnn_cfg.conv_stride),
-        conv_padding=tuple(cnn_cfg.conv_padding),
-        pool_kernel=tuple(cnn_cfg.pool_kernel),
-        leaky_slope=float(cnn_cfg.leaky_relu_slope),
-        temporal_attention=bool(getattr(cnn_cfg, "temporal_attention", False)),
+        dropout_fc=spec["dropout_fc"],
+        conv_kernel=spec["conv_kernel"],
+        conv_stride=spec["conv_stride"],
+        conv_padding=spec["conv_padding"],
+        pool_kernel=tuple(spec["pool_kernel"]),
+        leaky_slope=spec["leaky_relu_slope"],
+        temporal_attention=spec["temporal_attention"],
     )
     with torch.no_grad():
         _ = model(torch.zeros(1, in_ch, height, width))
