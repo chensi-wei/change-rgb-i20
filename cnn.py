@@ -48,17 +48,19 @@ def model_spec(window_key: str, cfg) -> dict:
     if not filters or any(type(v) is not int or v <= 0 for v in filters):
         raise ValueError("卷积通道数必须是非空正整数列表。")
     spec = {
-        "architecture": "price_image_cnn_layerwise_v1",
+        "architecture": "price_image_cnn_layerwise_dilated_v1",
         "window": window_key, "input_chw": [in_ch, height, width],
         "filters": filters, "n_out": 1,
         "leaky_relu_slope": float(cnn_cfg.leaky_relu_slope),
         "dropout_fc": float(cnn_cfg.dropout_fc),
         "temporal_attention": bool(getattr(cnn_cfg, "temporal_attention", False)),
-        "conv_dilation": [1, 1],
     }
     for name in ("conv_kernel", "conv_stride", "conv_padding"):
         spec[name] = _layer_pairs(_window_value(getattr(cnn_cfg, name), window_key),
                                   len(filters), name)
+    spec["conv_dilation"] = _layer_pairs(
+        _window_value(getattr(cnn_cfg, "conv_dilation", [1, 1]), window_key),
+        len(filters), "conv_dilation")
     pool = _layer_pairs(cnn_cfg.pool_kernel, 1, "pool_kernel")[0]
     pool_stride = _layer_pairs(getattr(cnn_cfg, "pool_stride", pool), 1, "pool_stride")[0]
     if pool_stride != pool:
@@ -66,10 +68,11 @@ def model_spec(window_key: str, cfg) -> dict:
     spec["pool_kernel"] = pool
     spec["pool_stride"] = pool_stride
     spec["block_hw"] = []
-    for i, (kernel, stride, padding) in enumerate(zip(
-            spec["conv_kernel"], spec["conv_stride"], spec["conv_padding"])):
-        height = (height + 2 * padding[0] - kernel[0]) // stride[0] + 1
-        width = (width + 2 * padding[1] - kernel[1]) // stride[1] + 1
+    for i, (kernel, stride, padding, dilation) in enumerate(zip(
+            spec["conv_kernel"], spec["conv_stride"], spec["conv_padding"],
+            spec["conv_dilation"])):
+        height = (height + 2 * padding[0] - dilation[0] * (kernel[0] - 1) - 1) // stride[0] + 1
+        width = (width + 2 * padding[1] - dilation[1] * (kernel[1] - 1) - 1) // stride[1] + 1
         height = (height - pool[0]) // pool_stride[0] + 1
         width = (width - pool[1]) // pool_stride[1] + 1
         if height <= 0 or width <= 0:
@@ -81,10 +84,10 @@ def model_spec(window_key: str, cfg) -> dict:
 class ConvBlock(nn.Module):
     def __init__(self, in_ch: int, out_ch: int,
                  kernel=(5, 3), stride=(3, 1), padding=(12, 1),
-                 pool=(2, 1), leaky_slope: float = 0.01):
+                 pool=(2, 1), leaky_slope: float = 0.01, dilation=(1, 1)):
         super().__init__()
         self.conv = nn.Conv2d(in_ch, out_ch, kernel_size=kernel,
-                              stride=stride, padding=padding, bias=False)
+                              stride=stride, padding=padding, dilation=dilation, bias=False)
         self.bn = nn.BatchNorm2d(out_ch)
         self.act = nn.LeakyReLU(negative_slope=leaky_slope, inplace=True)
         self.pool = nn.MaxPool2d(kernel_size=pool, stride=pool)
@@ -120,18 +123,19 @@ class CNNPriceImage(nn.Module):
                  dropout_fc: float = 0.5,
                  conv_kernel=(5, 3), conv_stride=(3, 1), conv_padding=(12, 1),
                  pool_kernel=(2, 1), leaky_slope: float = 0.01,
-                 temporal_attention: bool = False):
+                 temporal_attention: bool = False, conv_dilation=(1, 1)):
         super().__init__()
         layers: list[nn.Module] = []
         in_ch = int(in_ch)
         kernels = _layer_pairs(conv_kernel, len(filters), "conv_kernel")
         strides = _layer_pairs(conv_stride, len(filters), "conv_stride")
         paddings = _layer_pairs(conv_padding, len(filters), "conv_padding")
+        dilations = _layer_pairs(conv_dilation, len(filters), "conv_dilation")
         for i, out_ch in enumerate(filters):
             layers.append(ConvBlock(
                 in_ch, out_ch,
                 kernel=tuple(kernels[i]), stride=tuple(strides[i]), padding=tuple(paddings[i]),
-                pool=pool_kernel, leaky_slope=leaky_slope,
+                pool=pool_kernel, leaky_slope=leaky_slope, dilation=tuple(dilations[i]),
             ))
             in_ch = out_ch
         self.features = nn.Sequential(*layers)
@@ -171,6 +175,7 @@ def build_model(window_key: str, cfg) -> CNNPriceImage:
         conv_kernel=spec["conv_kernel"],
         conv_stride=spec["conv_stride"],
         conv_padding=spec["conv_padding"],
+        conv_dilation=spec["conv_dilation"],
         pool_kernel=tuple(spec["pool_kernel"]),
         leaky_slope=spec["leaky_relu_slope"],
         temporal_attention=spec["temporal_attention"],

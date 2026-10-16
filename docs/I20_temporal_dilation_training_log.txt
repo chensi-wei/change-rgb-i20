@@ -1,0 +1,156 @@
+model_spec = {'architecture': 'price_image_cnn_layerwise_dilated_v1', 'window': 'I20', 'input_chw': [1, 100, 60], 'filters': [64, 128, 256], 'n_out': 1, 'leaky_relu_slope': 0.01, 'dropout_fc': 0.5, 'temporal_attention': True, 'conv_kernel': [[5, 3], [5, 3], [5, 3]], 'conv_stride': [[1, 1], [2, 1], [2, 1]], 'conv_padding': [[2, 1], [2, 3], [2, 6]], 'conv_dilation': [[1, 1], [1, 3], [1, 6]], 'pool_kernel': [2, 1], 'pool_stride': [2, 1], 'block_hw': [[50, 60], [12, 60], [3, 60]]}
+images = /storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_attention_v1/I20
+models = /storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_temporal_dilation_v1/models/I20
+epochs = 10  selection = daily_rank_ic （固定轮数，只按验证集选模，另存整体 Spearman 对照）
+loaded (9220817, 1, 100, 60) labels 9220817 {'test': 6361884, 'train': 1825605, 'valid': 907946, 'ignore': 125382}
+[seed 20260417] device=cuda  regression target=future_ret  train=1825605  valid=907946
+[seed 20260417] winsor [-0.106814, 0.150110]  target mean=0.000129 std=0.042801  （损失用截尾后再标准化；选模=daily_rank_ic，只使用验证集原始超额）
+[seed 20260417] training objective={'version': 1, 'name': 'mse', 'sampler': 'random'}
+[seed 20260417] model spec={'architecture': 'price_image_cnn_layerwise_dilated_v1', 'window': 'I20', 'input_chw': [1, 100, 60], 'filters': [64, 128, 256], 'n_out': 1, 'leaky_relu_slope': 0.01, 'dropout_fc': 0.5, 'temporal_attention': True, 'conv_kernel': [[5, 3], [5, 3], [5, 3]], 'conv_stride': [[1, 1], [2, 1], [2, 1]], 'conv_padding': [[2, 1], [2, 3], [2, 6]], 'conv_dilation': [[1, 1], [1, 3], [1, 6]], 'pool_kernel': [2, 1], 'pool_stride': [2, 1], 'block_hw': [[50, 60], [12, 60], [3, 60]]}
+[seed 20260417] fitting pixel stats ...
+[seed 20260417] pixel mean=24.5427 std=66.0674
+[seed 20260417] batch=64  train_batches≈28526  pin_memory=False
+[seed 20260417] building model ...
+[seed 20260417] fixed 10 epochs, no early stop, keep highest daily_rank_ic; also retain legacy pooled Spearman winner
+[seed 20260417] start epoch 1/10
+                                                                               
+[seed 20260417] ep 01/10  train mse=0.002664 dir=0.508  valid mse=0.001919 dir=0.545 pooled_ic=0.0935 daily_ic=0.0919 dates=268/268  loss_z=1.4545 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=4566.5  best_epoch=1  best
+[seed 20260417] wrote seed_0.running.pt after epoch 1
+[seed 20260417] start epoch 2/10
+                                                                              
+[seed 20260417] ep 02/10  train mse=0.001867 dir=0.521  valid mse=0.001915 dir=0.538 pooled_ic=0.0878 daily_ic=0.0929 dates=268/268  loss_z=1.0191 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1182.1  best_epoch=2  best
+[seed 20260417] wrote seed_0.running.pt after epoch 2
+[seed 20260417] start epoch 3/10
+                                                                              
+[seed 20260417] ep 03/10  train mse=0.001831 dir=0.529  valid mse=0.001915 dir=0.511 pooled_ic=0.1002 daily_ic=0.1031 dates=268/268  loss_z=0.9995 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1182.3  best_epoch=3  best
+[seed 20260417] wrote seed_0.running.pt after epoch 3
+[seed 20260417] start epoch 4/10
+                                                                              
+[seed 20260417] ep 04/10  train mse=0.001816 dir=0.535  valid mse=0.001918 dir=0.510 pooled_ic=0.0908 daily_ic=0.0965 dates=268/268  loss_z=0.9914 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1182.5  best_epoch=3
+[seed 20260417] wrote seed_0.running.pt after epoch 4
+[seed 20260417] start epoch 5/10
+                                                                              
+[seed 20260417] ep 05/10  train mse=0.001808 dir=0.540  valid mse=0.001912 dir=0.537 pooled_ic=0.1058 daily_ic=0.1073 dates=268/268  loss_z=0.9868 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1182.4  best_epoch=5  best
+[seed 20260417] wrote seed_0.running.pt after epoch 5
+[seed 20260417] start epoch 6/10
+                                                                              
+[seed 20260417] ep 06/10  train mse=0.001801 dir=0.543  valid mse=0.001916 dir=0.539 pooled_ic=0.1028 daily_ic=0.1062 dates=268/268  loss_z=0.9830 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1182.3  best_epoch=5
+[seed 20260417] wrote seed_0.running.pt after epoch 6
+[seed 20260417] start epoch 7/10
+                                                                              
+[seed 20260417] ep 07/10  train mse=0.001796 dir=0.546  valid mse=0.001919 dir=0.546 pooled_ic=0.1036 daily_ic=0.1068 dates=268/268  loss_z=0.9801 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1182.3  best_epoch=5
+[seed 20260417] wrote seed_0.running.pt after epoch 7
+[seed 20260417] start epoch 8/10
+                                                                              
+[seed 20260417] ep 08/10  train mse=0.001790 dir=0.549  valid mse=0.001913 dir=0.523 pooled_ic=0.1142 daily_ic=0.1144 dates=268/268  loss_z=0.9774 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1182.2  best_epoch=8  best
+[seed 20260417] wrote seed_0.running.pt after epoch 8
+[seed 20260417] start epoch 9/10
+                                                                              
+[seed 20260417] ep 09/10  train mse=0.001786 dir=0.551  valid mse=0.001917 dir=0.546 pooled_ic=0.1098 daily_ic=0.1122 dates=268/268  loss_z=0.9752 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1182.3  best_epoch=8
+[seed 20260417] wrote seed_0.running.pt after epoch 9
+[seed 20260417] start epoch 10/10
+                                                                               
+[seed 20260417] ep 10/10  train mse=0.001782 dir=0.553  valid mse=0.001916 dir=0.534 pooled_ic=0.1105 daily_ic=0.1130 dates=268/268  loss_z=0.9726 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1182.5  best_epoch=8
+[seed 20260417] wrote seed_0.running.pt after epoch 10
+[seed 20260417] saved /storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_temporal_dilation_v1/models/I20/seed_0.pt  best_epoch=8/10  daily_rank_ic=0.1144 val_mse=0.001913 val_dir=0.5225  pooled comparison epoch=8 saved /storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_temporal_dilation_v1/models/I20/pooled_spearman/seed_0.pt  15207.9s
+[seed 20260418] device=cuda  regression target=future_ret  train=1825605  valid=907946
+[seed 20260418] winsor [-0.106814, 0.150110]  target mean=0.000129 std=0.042801  （损失用截尾后再标准化；选模=daily_rank_ic，只使用验证集原始超额）
+[seed 20260418] training objective={'version': 1, 'name': 'mse', 'sampler': 'random'}
+[seed 20260418] model spec={'architecture': 'price_image_cnn_layerwise_dilated_v1', 'window': 'I20', 'input_chw': [1, 100, 60], 'filters': [64, 128, 256], 'n_out': 1, 'leaky_relu_slope': 0.01, 'dropout_fc': 0.5, 'temporal_attention': True, 'conv_kernel': [[5, 3], [5, 3], [5, 3]], 'conv_stride': [[1, 1], [2, 1], [2, 1]], 'conv_padding': [[2, 1], [2, 3], [2, 6]], 'conv_dilation': [[1, 1], [1, 3], [1, 6]], 'pool_kernel': [2, 1], 'pool_stride': [2, 1], 'block_hw': [[50, 60], [12, 60], [3, 60]]}
+[seed 20260418] fitting pixel stats ...
+[seed 20260418] pixel mean=24.6304 std=66.2020
+[seed 20260418] batch=64  train_batches≈28526  pin_memory=False
+[seed 20260418] building model ...
+[seed 20260418] fixed 10 epochs, no early stop, keep highest daily_rank_ic; also retain legacy pooled Spearman winner
+[seed 20260418] start epoch 1/10
+                                                                              
+[seed 20260418] ep 01/10  train mse=0.002711 dir=0.507  valid mse=0.001947 dir=0.471 pooled_ic=0.0754 daily_ic=0.0754 dates=268/268  loss_z=1.4797 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1182.3  best_epoch=1  best
+[seed 20260418] wrote seed_1.running.pt after epoch 1
+[seed 20260418] start epoch 2/10
+                                                                              
+[seed 20260418] ep 02/10  train mse=0.001877 dir=0.518  valid mse=0.001914 dir=0.527 pooled_ic=0.0895 daily_ic=0.0913 dates=268/268  loss_z=1.0247 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1182.4  best_epoch=2  best
+[seed 20260418] wrote seed_1.running.pt after epoch 2
+[seed 20260418] start epoch 3/10
+                                                                              
+[seed 20260418] ep 03/10  train mse=0.001823 dir=0.530  valid mse=0.001931 dir=0.489 pooled_ic=0.0869 daily_ic=0.0939 dates=268/268  loss_z=0.9951 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1182.6  best_epoch=3  best
+[seed 20260418] wrote seed_1.running.pt after epoch 3
+[seed 20260418] start epoch 4/10
+                                                                              
+[seed 20260418] ep 04/10  train mse=0.001811 dir=0.537  valid mse=0.001912 dir=0.525 pooled_ic=0.1008 daily_ic=0.1033 dates=268/268  loss_z=0.9886 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1182.3  best_epoch=4  best
+[seed 20260418] wrote seed_1.running.pt after epoch 4
+[seed 20260418] start epoch 5/10
+                                                                              
+[seed 20260418] ep 05/10  train mse=0.001803 dir=0.542  valid mse=0.001911 dir=0.533 pooled_ic=0.1056 daily_ic=0.1076 dates=268/268  loss_z=0.9841 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1182.3  best_epoch=5  best
+[seed 20260418] wrote seed_1.running.pt after epoch 5
+[seed 20260418] start epoch 6/10
+                                                                              
+[seed 20260418] ep 06/10  train mse=0.001796 dir=0.545  valid mse=0.001921 dir=0.549 pooled_ic=0.1074 daily_ic=0.1110 dates=268/268  loss_z=0.9806 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1182.5  best_epoch=6  best
+[seed 20260418] wrote seed_1.running.pt after epoch 6
+[seed 20260418] start epoch 7/10
+                                                                              
+[seed 20260418] ep 07/10  train mse=0.001790 dir=0.549  valid mse=0.001935 dir=0.498 pooled_ic=0.0986 daily_ic=0.1040 dates=268/268  loss_z=0.9771 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1182.6  best_epoch=6
+[seed 20260418] wrote seed_1.running.pt after epoch 7
+[seed 20260418] start epoch 8/10
+                                                                              
+[seed 20260418] ep 08/10  train mse=0.001784 dir=0.552  valid mse=0.001933 dir=0.500 pooled_ic=0.1002 daily_ic=0.1047 dates=268/268  loss_z=0.9738 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1182.5  best_epoch=6
+[seed 20260418] wrote seed_1.running.pt after epoch 8
+[seed 20260418] start epoch 9/10
+                                                                              
+[seed 20260418] ep 09/10  train mse=0.001779 dir=0.554  valid mse=0.001932 dir=0.503 pooled_ic=0.1079 daily_ic=0.1094 dates=268/268  loss_z=0.9712 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1182.6  best_epoch=6
+[seed 20260418] wrote seed_1.running.pt after epoch 9
+[seed 20260418] start epoch 10/10
+                                                                               
+[seed 20260418] ep 10/10  train mse=0.001773 dir=0.558  valid mse=0.001925 dir=0.510 pooled_ic=0.1132 daily_ic=0.1140 dates=268/268  loss_z=0.9680 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1182.5  best_epoch=10  best
+[seed 20260418] wrote seed_1.running.pt after epoch 10
+[seed 20260418] saved /storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_temporal_dilation_v1/models/I20/seed_1.pt  best_epoch=10/10  daily_rank_ic=0.1140 val_mse=0.001925 val_dir=0.5096  pooled comparison epoch=10 saved /storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_temporal_dilation_v1/models/I20/pooled_spearman/seed_1.pt  11825.6s
+[seed 20260419] device=cuda  regression target=future_ret  train=1825605  valid=907946
+[seed 20260419] winsor [-0.106814, 0.150110]  target mean=0.000129 std=0.042801  （损失用截尾后再标准化；选模=daily_rank_ic，只使用验证集原始超额）
+[seed 20260419] training objective={'version': 1, 'name': 'mse', 'sampler': 'random'}
+[seed 20260419] model spec={'architecture': 'price_image_cnn_layerwise_dilated_v1', 'window': 'I20', 'input_chw': [1, 100, 60], 'filters': [64, 128, 256], 'n_out': 1, 'leaky_relu_slope': 0.01, 'dropout_fc': 0.5, 'temporal_attention': True, 'conv_kernel': [[5, 3], [5, 3], [5, 3]], 'conv_stride': [[1, 1], [2, 1], [2, 1]], 'conv_padding': [[2, 1], [2, 3], [2, 6]], 'conv_dilation': [[1, 1], [1, 3], [1, 6]], 'pool_kernel': [2, 1], 'pool_stride': [2, 1], 'block_hw': [[50, 60], [12, 60], [3, 60]]}
+[seed 20260419] fitting pixel stats ...
+[seed 20260419] pixel mean=24.5968 std=66.1522
+[seed 20260419] batch=64  train_batches≈28526  pin_memory=False
+[seed 20260419] building model ...
+[seed 20260419] fixed 10 epochs, no early stop, keep highest daily_rank_ic; also retain legacy pooled Spearman winner
+[seed 20260419] start epoch 1/10
+                                                                              
+[seed 20260419] ep 01/10  train mse=0.002631 dir=0.508  valid mse=0.001922 dir=0.539 pooled_ic=0.0784 daily_ic=0.0784 dates=268/268  loss_z=1.4361 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1183.0  best_epoch=1  best
+[seed 20260419] wrote seed_2.running.pt after epoch 1
+[seed 20260419] start epoch 2/10
+                                                                              
+[seed 20260419] ep 02/10  train mse=0.001860 dir=0.522  valid mse=0.001926 dir=0.552 pooled_ic=0.0934 daily_ic=0.0959 dates=268/268  loss_z=1.0154 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1184.8  best_epoch=2  best
+[seed 20260419] wrote seed_2.running.pt after epoch 2
+[seed 20260419] start epoch 3/10
+                                                                              
+[seed 20260419] ep 03/10  train mse=0.001828 dir=0.531  valid mse=0.001922 dir=0.556 pooled_ic=0.1070 daily_ic=0.1059 dates=268/268  loss_z=0.9978 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1186.8  best_epoch=3  best
+[seed 20260419] wrote seed_2.running.pt after epoch 3
+[seed 20260419] start epoch 4/10
+                                                                              
+[seed 20260419] ep 04/10  train mse=0.001813 dir=0.537  valid mse=0.001944 dir=0.483 pooled_ic=0.0872 daily_ic=0.0947 dates=268/268  loss_z=0.9897 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1189.9  best_epoch=3
+[seed 20260419] wrote seed_2.running.pt after epoch 4
+[seed 20260419] start epoch 5/10
+                                                                              
+[seed 20260419] ep 05/10  train mse=0.001805 dir=0.541  valid mse=0.001927 dir=0.499 pooled_ic=0.1001 daily_ic=0.1055 dates=268/268  loss_z=0.9853 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1191.1  best_epoch=3
+[seed 20260419] wrote seed_2.running.pt after epoch 5
+[seed 20260419] start epoch 6/10
+                                                                              
+[seed 20260419] ep 06/10  train mse=0.001797 dir=0.545  valid mse=0.001918 dir=0.512 pooled_ic=0.1067 daily_ic=0.1087 dates=268/268  loss_z=0.9811 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1192.0  best_epoch=6  best
+[seed 20260419] wrote seed_2.running.pt after epoch 6
+[seed 20260419] start epoch 7/10
+                                                                              
+[seed 20260419] ep 07/10  train mse=0.001793 dir=0.547  valid mse=0.001913 dir=0.527 pooled_ic=0.1052 daily_ic=0.1097 dates=268/268  loss_z=0.9786 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1192.8  best_epoch=7  best
+[seed 20260419] wrote seed_2.running.pt after epoch 7
+[seed 20260419] start epoch 8/10
+                                                                              
+[seed 20260419] ep 08/10  train mse=0.001787 dir=0.550  valid mse=0.001917 dir=0.515 pooled_ic=0.1109 daily_ic=0.1122 dates=268/268  loss_z=0.9757 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1190.2  best_epoch=8  best
+[seed 20260419] wrote seed_2.running.pt after epoch 8
+[seed 20260419] start epoch 9/10
+                                                                              
+[seed 20260419] ep 09/10  train mse=0.001783 dir=0.553  valid mse=0.001922 dir=0.546 pooled_ic=0.1060 daily_ic=0.1099 dates=268/268  loss_z=0.9731 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1188.9  best_epoch=8
+[seed 20260419] wrote seed_2.running.pt after epoch 9
+[seed 20260419] start epoch 10/10
+                                                                               
+[seed 20260419] ep 10/10  train mse=0.001778 dir=0.555  valid mse=0.001914 dir=0.528 pooled_ic=0.1111 daily_ic=0.1124 dates=268/268  loss_z=0.9707 rank=0.0000 pairs=0 rank_batches=0/28526  epoch_s=1187.8  best_epoch=10  best
+[seed 20260419] wrote seed_2.running.pt after epoch 10
+[seed 20260419] saved /storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_temporal_dilation_v1/models/I20/seed_2.pt  best_epoch=10/10  daily_rank_ic=0.1124 val_mse=0.001914 val_dir=0.5282  pooled comparison epoch=10 saved /storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_temporal_dilation_v1/models/I20/pooled_spearman/seed_2.pt  11888.1s
+[{'seed': 20260417, 'best_epoch': 8, 'best_val_mse': 0.0019131131152800456, 'training_objective': {'version': 1, 'name': 'mse', 'sampler': 'random'}, 'train_batch_size': 64, 'model_spec': {'architecture': 'price_image_cnn_layerwise_dilated_v1', 'window': 'I20', 'input_chw': [1, 100, 60], 'filters': [64, 128, 256], 'n_out': 1, 'leaky_relu_slope': 0.01, 'dropout_fc': 0.5, 'temporal_attention': True, 'conv_kernel': [[5, 3], [5, 3], [5, 3]], 'conv_stride': [[1, 1], [2, 1], [2, 1]], 'conv_padding': [[2, 1], [2, 3], [2, 6]], 'conv_dilation': [[1, 1], [1, 3], [1, 6]], 'pool_kernel': [2, 1], 'pool_stride': [2, 1], 'block_hw': [[50, 60], [12, 60], [3, 60]]}, 'best_val_dir': 0.5225288728624831, 'best_val_ic': 0.11419525859972654, 'selection': 'daily_rank_ic', 'best_selection_score': 0.11436591810926564, 'best_valid_daily_rank_ic': 0.11436591810926564, 'pooled_best_epoch': 8, 'pooled_best_val_ic': 0.11419525859972654, 'pooled_path': '/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_temporal_dilation_v1/models/I20/pooled_spearman/seed_0.pt', 'epochs': 10, 'elapsed_s': 15207.940685272217, 'path': '/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_temporal_dilation_v1/models/I20/seed_0.pt'}, {'seed': 20260418, 'best_epoch': 10, 'best_val_mse': 0.0019252625417566537, 'training_objective': {'version': 1, 'name': 'mse', 'sampler': 'random'}, 'train_batch_size': 64, 'model_spec': {'architecture': 'price_image_cnn_layerwise_dilated_v1', 'window': 'I20', 'input_chw': [1, 100, 60], 'filters': [64, 128, 256], 'n_out': 1, 'leaky_relu_slope': 0.01, 'dropout_fc': 0.5, 'temporal_attention': True, 'conv_kernel': [[5, 3], [5, 3], [5, 3]], 'conv_stride': [[1, 1], [2, 1], [2, 1]], 'conv_padding': [[2, 1], [2, 3], [2, 6]], 'conv_dilation': [[1, 1], [1, 3], [1, 6]], 'pool_kernel': [2, 1], 'pool_stride': [2, 1], 'block_hw': [[50, 60], [12, 60], [3, 60]]}, 'best_val_dir': 0.5095688510109632, 'best_val_ic': 0.11321643888103232, 'selection': 'daily_rank_ic', 'best_selection_score': 0.11396994843922997, 'best_valid_daily_rank_ic': 0.11396994843922997, 'pooled_best_epoch': 10, 'pooled_best_val_ic': 0.11321643888103232, 'pooled_path': '/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_temporal_dilation_v1/models/I20/pooled_spearman/seed_1.pt', 'epochs': 10, 'elapsed_s': 11825.628028154373, 'path': '/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_temporal_dilation_v1/models/I20/seed_1.pt'}, {'seed': 20260419, 'best_epoch': 10, 'best_val_mse': 0.001914256574690336, 'training_objective': {'version': 1, 'name': 'mse', 'sampler': 'random'}, 'train_batch_size': 64, 'model_spec': {'architecture': 'price_image_cnn_layerwise_dilated_v1', 'window': 'I20', 'input_chw': [1, 100, 60], 'filters': [64, 128, 256], 'n_out': 1, 'leaky_relu_slope': 0.01, 'dropout_fc': 0.5, 'temporal_attention': True, 'conv_kernel': [[5, 3], [5, 3], [5, 3]], 'conv_stride': [[1, 1], [2, 1], [2, 1]], 'conv_padding': [[2, 1], [2, 3], [2, 6]], 'conv_dilation': [[1, 1], [1, 3], [1, 6]], 'pool_kernel': [2, 1], 'pool_stride': [2, 1], 'block_hw': [[50, 60], [12, 60], [3, 60]]}, 'best_val_dir': 0.5282120302308727, 'best_val_ic': 0.11105341490821251, 'selection': 'daily_rank_ic', 'best_selection_score': 0.11241736078227572, 'best_valid_daily_rank_ic': 0.11241736078227572, 'pooled_best_epoch': 10, 'pooled_best_val_ic': 0.11105341490821251, 'pooled_path': '/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_temporal_dilation_v1/models/I20/pooled_spearman/seed_2.pt', 'epochs': 10, 'elapsed_s': 11888.139973163605, 'path': '/storage/server/144server/cq/ChenSiwei/k_pictures_gray_body_i20_temporal_dilation_v1/models/I20/seed_2.pt'}]
